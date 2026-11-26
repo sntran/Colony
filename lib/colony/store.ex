@@ -5,6 +5,14 @@ defmodule Colony.Store do
 
   require Logger
 
+  # The file reader accepts only atoms that the VM knows. In development the VM loads a
+  # module at its first use, and the reader runs before the world module is used. This
+  # list makes sure that the VM knows all the atoms of a save file when it reads one.
+  @atoms [:version, :seed, :locked, :scent, :food_pile, :food_nest, :worker, :player]
+
+  @doc "All the atoms that a save file can have."
+  def atoms, do: @atoms
+
   @doc "The path of the save file from the game config."
   def path(cfg), do: Path.expand(Keyword.fetch!(cfg, :save_file))
 
@@ -41,6 +49,7 @@ defmodule Colony.Store do
   end
 
   defp decode(binary) do
+    _ = atoms()
     {:ok, :erlang.binary_to_term(binary, [:safe])}
   rescue
     ArgumentError -> {:error, :bad_file}

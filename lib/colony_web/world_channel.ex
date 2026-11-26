@@ -24,6 +24,9 @@ defmodule ColonyWeb.WorldChannel do
   @impl true
   def handle_info({:after_join, params}, socket) do
     demo? = params["demo"] == true
+    # If the world process stops, this channel stops also. The page then joins again and
+    # gets the new world.
+    Process.monitor(Server)
     {:ok, id, snapshot} = Server.join(self(), clean_name(params["name"]), demo?)
     push(socket, "s", {:binary, snapshot})
     {:noreply, assign(socket, :id, if(demo?, do: nil, else: id))}
@@ -32,6 +35,10 @@ defmodule ColonyWeb.WorldChannel do
   def handle_info({:you, message}, socket) do
     push(socket, "you", message)
     {:noreply, socket}
+  end
+
+  def handle_info({:DOWN, _reference, :process, _pid, _reason}, socket) do
+    {:stop, :shutdown, socket}
   end
 
   def handle_info(_message, socket), do: {:noreply, socket}

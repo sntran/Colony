@@ -33,6 +33,7 @@ defmodule Colony.WorkersTest do
     # The number of workers stays the same.
     world = Sim.run(world, 600)
     assert map_size(world.workers) + length(Sim.locked_workers(world)) == 200
+
     assert world.food_nest + world.food_pile + Enum.count(world.workers, fn {_, w} -> w.carry end) ==
              500
   end

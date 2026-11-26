@@ -88,7 +88,10 @@ defmodule Colony.Protocol do
           <<id::16-little, cell::16-little, flags::8>>
         end
       ),
-      section(@moves, for({id, direction} <- events.moves, do: <<id <<< 3 ||| direction::16-little>>)),
+      section(
+        @moves,
+        for({id, direction} <- events.moves, do: <<id <<< 3 ||| direction::16-little>>)
+      ),
       section(@worker_gone, for(id <- events.worker_gone, do: <<id::16-little>>)),
       section(@locks, events.locks |> Enum.reverse() |> Enum.map(&lock_record/1)),
       section(@fell, for(cell <- events.fell, do: <<cell::16-little>>)),
@@ -150,8 +153,8 @@ defmodule Colony.Protocol do
   defp lock_record({cell, body}) do
     kind = if body.kind == :player, do: 1, else: 0
 
-    <<cell::16-little, kind::8, body.id::16-little, body.time::32-little,
-      byte_size(body.name)::8, body.name::binary>>
+    <<cell::16-little, kind::8, body.id::16-little, body.time::32-little, byte_size(body.name)::8,
+      body.name::binary>>
   end
 
   defp carry_flag(%{carry: true}), do: 1

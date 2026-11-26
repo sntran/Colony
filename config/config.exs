@@ -4,8 +4,7 @@ config :phoenix, :json_library, JSON
 
 config :colony, ColonyWeb.Endpoint,
   adapter: Bandit.PhoenixAdapter,
-  pubsub_server: Colony.PubSub,
-  server: false
+  pubsub_server: Colony.PubSub
 
 config :logger, :default_formatter, format: "$time [$level] $message\n"
 

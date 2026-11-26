@@ -126,7 +126,10 @@ defmodule Colony.BridgeTest do
     {world, events} = World.take_events(world)
 
     assert Enum.sort(events.fell) == Enum.sort([eighth, beside])
-    assert Enum.sort(Map.keys(world.locked)) == Enum.sort(for n <- 1..7, do: Sim.gap_cell(world, n, @col))
+
+    assert Enum.sort(Map.keys(world.locked)) ==
+             Enum.sort(for n <- 1..7, do: Sim.gap_cell(world, n, @col))
+
     assert world.supports[first] == 7.0
     assert world.supports[seventh] == 1.0
   end

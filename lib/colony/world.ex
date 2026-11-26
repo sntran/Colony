@@ -475,7 +475,10 @@ defmodule Colony.World do
         budget = min(@budget_cap, player.budget + world.p.step * 1.15)
         world = %{world | players: Map.put(world.players, id, %{player | budget: budget})}
         world = touch(world, player.cell)
-        world = if player.scent, do: put_scent(world, player.cell, world.p.scent_player), else: world
+
+        world =
+          if player.scent, do: put_scent(world, player.cell, world.p.scent_player), else: world
+
         touch_food(world, id, %{player | budget: budget})
 
       _, world ->

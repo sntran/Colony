@@ -203,7 +203,11 @@ defmodule Colony.Server do
 
   defp keep_time(state, time) do
     if state.time_count >= @keep_times do
-      %{state | times: [time | Enum.take(state.times, div(@keep_times, 2))], time_count: div(@keep_times, 2) + 1}
+      %{
+        state
+        | times: [time | Enum.take(state.times, div(@keep_times, 2))],
+          time_count: div(@keep_times, 2) + 1
+      }
     else
       %{state | times: [time | state.times], time_count: state.time_count + 1}
     end

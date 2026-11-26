@@ -63,7 +63,12 @@ defmodule Colony.Mirror do
     records(mirror, tag, count - 1, rest)
   end
 
-  defp record(mirror, 1, <<_width::16, _rows::24, _nest::16, _food::16, _seed::32, you::16-little, _rate::8, _speed::8, decay::16-little, _units::16, rest::binary>>) do
+  defp record(
+         mirror,
+         1,
+         <<_width::16, _rows::24, _nest::16, _food::16, _seed::32, you::16-little, _rate::8,
+           _speed::8, decay::16-little, _units::16, rest::binary>>
+       ) do
     {%{mirror | you: you, decay_ticks: decay}, rest}
   end
 
@@ -79,7 +84,13 @@ defmodule Colony.Mirror do
     id = value >>> 3
     direction = value &&& 7
     {cell, carry} = Map.fetch!(mirror.workers, id)
-    to = Enum.find(Grid.neighbors(mirror.grid, cell), &(Grid.direction(mirror.grid, cell, &1) == direction))
+
+    to =
+      Enum.find(
+        Grid.neighbors(mirror.grid, cell),
+        &(Grid.direction(mirror.grid, cell, &1) == direction)
+      )
+
     {%{mirror | workers: Map.put(mirror.workers, id, {to, carry})}, rest}
   end
 
@@ -87,8 +98,14 @@ defmodule Colony.Mirror do
     {%{mirror | workers: Map.delete(mirror.workers, id)}, rest}
   end
 
-  defp record(mirror, 6, <<cell::16-little, kind::8, id::16-little, time::32-little, size::8, name::binary-size(size), rest::binary>>) do
-    {%{mirror | locks: Map.put(mirror.locks, cell, %{kind: kind, id: id, time: time, name: name})}, rest}
+  defp record(
+         mirror,
+         6,
+         <<cell::16-little, kind::8, id::16-little, time::32-little, size::8,
+           name::binary-size(size), rest::binary>>
+       ) do
+    {%{mirror | locks: Map.put(mirror.locks, cell, %{kind: kind, id: id, time: time, name: name})},
+     rest}
   end
 
   defp record(mirror, 7, <<cell::16-little, rest::binary>>) do
@@ -111,7 +128,11 @@ defmodule Colony.Mirror do
     {%{mirror | food: {pile, nest}}, rest}
   end
 
-  defp record(mirror, 12, <<id::16-little, x::16-little, z::16-little, heading::8, flags::8, rest::binary>>) do
+  defp record(
+         mirror,
+         12,
+         <<id::16-little, x::16-little, z::16-little, heading::8, flags::8, rest::binary>>
+       ) do
     player = %{x: x / 1000 - 1, z: z / 1000 - 1, heading: heading, scent: flags == 1}
     {%{mirror | players: Map.put(mirror.players, id, player)}, rest}
   end
