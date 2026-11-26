@@ -1,0 +1,7 @@
+/_build/
+/deps/
+/priv/data/
+/tmp/
+/node_modules/
+erl_crash.dump
+*.ez
