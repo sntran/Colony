@@ -3,7 +3,7 @@
 // There are four programs: the ground, the water, the bodies and the plain shapes.
 // The bodies and the plain shapes use instancing: one draw call for all of them.
 
-import { ROW_STEP } from "./hex.js";
+import { ROW_STEP, GAP } from "./hex.js";
 import { BODY_STRIDE, MESH_STRIDE, FOOD_COLOR } from "./state.js";
 import * as shapes from "./geometry.js";
 
@@ -38,8 +38,9 @@ const GROUND_FS = `${COMMON}
 in vec3 vPos; in vec3 vNormal; in vec3 vColor;
 uniform vec3 uEye;
 uniform float uTime;
-uniform vec4 uGrid;      // width, rows, near rows, first far row
+uniform vec2 uGrid;      // width, rows
 uniform sampler2D uScent;
+uniform sampler2D uBank;  // 1 for a bank cell, 0 for a river cell
 out vec4 color;
 
 // The cell of a point: column, row, and the distance from the center (0.5 at the edge).
@@ -63,8 +64,8 @@ void main() {
   float glow = 0.0;
 
   vec3 cell = cellOf(vPos.xz);
-  bool bank = cell.y < uGrid.z || cell.y >= uGrid.w;
-  if (top > 0.0 && bank && cell.x >= 0.0 && cell.x < uGrid.x && cell.y >= 0.0 && cell.y < uGrid.y) {
+  if (top > 0.0 && cell.x >= 0.0 && cell.x < uGrid.x && cell.y >= 0.0 && cell.y < uGrid.y &&
+      texelFetch(uBank, ivec2(cell.xy), 0).r > 0.5) {
     // A thin line between the cells.
     c *= 1.0 - 0.13 * top * smoothstep(0.455, 0.5, cell.z);
     // Scent: a soft spot of light in the cell.
@@ -109,42 +110,50 @@ layout(location=0) in vec3 aPos;
 layout(location=1) in vec3 aNormal;
 layout(location=2) in vec3 aMove;    // weight, step group, shade
 layout(location=3) in vec4 iPos;     // x, y, z, scale
-layout(location=4) in vec4 iTurn;    // cos and sin of the heading, cos and sin of the tilt
+layout(location=4) in vec4 iTurn;    // cos and sin of the heading, not used
 layout(location=5) in vec4 iColor;   // red, green, blue, lock
-layout(location=6) in vec4 iStep;    // sin and cos of the walk phase, not used, shake
+layout(location=6) in vec4 iStep;    // sin and cos of the walk phase, legs, shake
+layout(location=7) in vec4 aLock;    // the position in a locked body, and the number of the leg
 uniform mat4 uViewProj;
-out vec3 vNormal; out vec3 vColor; out vec3 vWorld;
+out vec3 vNormal; out vec3 vColor; out vec3 vWorld; out float vLock;
 void main() {
   // The page calculates each sine and cosine one time for a body, not for each vertex.
   vec3 p = aPos;
+  vec3 n = aNormal;
   float weight = aMove.x;
   float lock = iColor.a;
-  // The legs move when the body walks. Two groups of three legs move in turn.
-  float group = 1.0 - 2.0 * aMove.y;
-  p.z += iStep.x * group * 0.075 * weight * (1.0 - lock);
-  p.y += max(0.0, iStep.y * group) * 0.055 * weight * (1.0 - lock);
-  // A locked body puts its legs out flat. They hold the bodies near it.
-  p.x *= 1.0 + 0.5 * weight * lock;
-  p.z *= 1.0 + 0.3 * weight * lock;
-  p.y = mix(p.y, 0.09, weight * lock * 0.75);
-  // A body with not much support shakes.
-  p.x += iStep.w;
+  if (lock > 0.5) {
+    // A locked body is flat and low. Each leg goes to the edge of the cell if a body or a
+    // bank is in its direction. If not, the leg stays short.
+    p = aLock.xyz;
+    if (aLock.w >= 0.0) {
+      float there = mod(floor(iStep.z / exp2(aLock.w)), 2.0);
+      p.xz *= mix(0.4, 1.0, there);
+      n = vec3(0.0, 1.0, 0.0);
+    } else {
+      n = normalize(vec3(n.x, n.y * 2.0, n.z));
+    }
+    // A body with not much support shakes.
+    p.x += iStep.w;
+  } else {
+    // The legs move when the body walks. Two groups of three legs move in turn.
+    float group = 1.0 - 2.0 * aMove.y;
+    p.z += iStep.x * group * 0.075 * weight;
+    p.y += max(0.0, iStep.y * group) * 0.055 * weight;
+  }
   p *= iPos.w;
-
-  // Tilt (for a body that falls), then the heading.
-  p = vec3(p.x, p.y * iTurn.z - p.z * iTurn.w, p.y * iTurn.w + p.z * iTurn.z);
-  vec3 n = vec3(aNormal.x, aNormal.y * iTurn.z - aNormal.z * iTurn.w, aNormal.y * iTurn.w + aNormal.z * iTurn.z);
   p = vec3(p.x * iTurn.x + p.z * iTurn.y, p.y, -p.x * iTurn.y + p.z * iTurn.x);
   n = vec3(n.x * iTurn.x + n.z * iTurn.y, n.y, -n.x * iTurn.y + n.z * iTurn.x);
 
   vWorld = p + iPos.xyz;
   vNormal = n;
   vColor = iColor.rgb * aMove.z;
+  vLock = lock;
   gl_Position = uViewProj * vec4(vWorld, 1.0);
 }`;
 
 const BODY_FS = `${COMMON}
-in vec3 vNormal; in vec3 vColor; in vec3 vWorld;
+in vec3 vNormal; in vec3 vColor; in vec3 vWorld; in float vLock;
 uniform vec3 uEye;
 out vec4 color;
 void main() {
@@ -153,9 +162,9 @@ void main() {
   float sun = max(dot(n, normalize(SUN)), 0.0);
   float shine = pow(max(dot(n, normalize(normalize(SUN) + view)), 0.0), 24.0);
   float rim = pow(1.0 - max(dot(n, view), 0.0), 3.0);
-  vec3 c = vColor * (0.5 + 0.75 * sun) + vec3(0.5) * shine + vec3(0.2, 0.22, 0.25) * rim;
-  // A body below the ground level is in the gap. It gets dark.
-  c *= mix(1.0, 0.35, clamp(-vWorld.y / 3.0, 0.0, 1.0));
+  // A free body shines. A locked body does not: it is a part of a structure.
+  float free = 1.0 - vLock;
+  vec3 c = vColor * (0.5 + 0.75 * sun) + vec3(0.5) * shine * free + vec3(0.2, 0.22, 0.25) * rim * free;
   color = vec4(mix(c, FOG, fogAt(distance(vWorld, uEye))), 1.0);
 }`;
 
@@ -269,7 +278,7 @@ export class Renderer {
     this.scale = Math.min(window.devicePixelRatio || 1, 2);
     this.ready = false;
 
-    this.ground = program(gl, GROUND_VS, GROUND_FS, ["uViewProj", "uEye", "uTime", "uGrid", "uScent"]);
+    this.ground = program(gl, GROUND_VS, GROUND_FS, ["uViewProj", "uEye", "uTime", "uGrid", "uScent", "uBank"]);
     this.water = program(gl, WATER_VS, WATER_FS, ["uViewProj", "uEye", "uTime"]);
     this.body = program(gl, BODY_VS, BODY_FS, ["uViewProj", "uEye", "uTime"]);
     this.shape = program(gl, SHAPE_VS, SHAPE_FS, ["uViewProj", "uEye", "uTime", "uMode"]);
@@ -288,7 +297,7 @@ export class Renderer {
     this.list("bodies", this.meshes.body, BODY_STRIDE);
     for (const [name, mesh] of [
       ["shadows", "disc"], ["crumbs", "blob"], ["rings", "ring"], ["cells", "cell"],
-      ["food", "blob"], ["beam", "beam"], ["holes", "disc"],
+      ["food", "blob"], ["beam", "beam"], ["holes", "disc"], ["decks", "cell"], ["marks", "disc"],
     ]) {
       this.list(name, this.meshes[mesh], MESH_STRIDE);
     }
@@ -330,9 +339,11 @@ export class Renderer {
     gl.vertexAttribPointer(0, 3, gl.FLOAT, false, bytes, 0);
     gl.enableVertexAttribArray(1);
     gl.vertexAttribPointer(1, 3, gl.FLOAT, false, bytes, 12);
-    if (mesh.stride === 9) {
+    if (mesh.stride === 13) {
       gl.enableVertexAttribArray(2);
       gl.vertexAttribPointer(2, 3, gl.FLOAT, false, bytes, 24);
+      gl.enableVertexAttribArray(7);
+      gl.vertexAttribPointer(7, 4, gl.FLOAT, false, bytes, 36);
     } else {
       // A plain shape has no color for each vertex and does not move in the wind.
       gl.vertexAttrib3f(2, 1, 1, 1);
@@ -380,9 +391,10 @@ export class Renderer {
       gl.vertexAttribPointer(i, 3, gl.FLOAT, false, 36, i * 12);
     }
 
+    // The water is below all the places where the river can be.
     const nearEdge = (grid.nearRows - 1) * ROW_STEP;
-    const farEdge = (grid.nearRows + grid.gapRows) * ROW_STEP;
-    const pad = terrain.pad;
+    const farEdge = (grid.nearRows + Math.max(...grid.river)) * ROW_STEP;
+    const pad = terrain.columns;
     const y = -shapes.GAP_DEPTH;
     const water = this.upload({
       vertices: new Float32Array([-pad, y, nearEdge - 1, grid.width + pad, y, nearEdge - 1, grid.width + pad, y, farEdge + 1, -pad, y, farEdge + 1]),
@@ -398,6 +410,17 @@ export class Renderer {
     gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 12, 0);
     gl.bindVertexArray(null);
 
+    // One number for each cell: 255 for a bank cell. The ground shader draws the lines
+    // of the cells and the scent only there.
+    const bank = new Uint8Array(grid.count);
+    for (let cell = 0; cell < grid.count; cell++) bank[cell] = grid.kind(cell) === GAP ? 0 : 255;
+    this.bankTexture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, this.bankTexture);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, grid.width, grid.rows, 0, gl.RED, gl.UNSIGNED_BYTE, bank);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+
     this.scentTexture = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, this.scentTexture);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
@@ -407,7 +430,7 @@ export class Renderer {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
 
-    this.decorate(world, terrain.height);
+    this.decorate(world, terrain);
     this.grid = grid;
     this.ready = true;
   }
@@ -432,26 +455,26 @@ export class Renderer {
   }
 
   // Grass, stones and the nest, from the seed of the world.
-  decorate(world, height) {
+  decorate(world, terrain) {
     const grid = world.grid;
+    const height = terrain.height;
     const random = shapes.randomFrom(world.seed ^ 0x51ed);
-    const nearEdge = (grid.nearRows - 1) * ROW_STEP;
-    const farEdge = (grid.nearRows + grid.gapRows) * ROW_STEP;
     const zEnd = (grid.rows - 1) * ROW_STEP;
     const nest = [grid.x(world.nest), grid.z(world.nest)];
-    const food = [grid.x(world.food), grid.z(world.food)];
     this.nest = nest;
-    this.foodAt = food;
-    const clear = (x, z) => Math.hypot(x - nest[0], z - nest[1]) > 1.1 && Math.hypot(x - food[0], z - food[1]) > 1.3;
-    // A random point on one of the two banks.
+    this.grid = grid;
+    const clear = (x, z) => Math.hypot(x - nest[0], z - nest[1]) > 1.1;
+    // A random point on one of the two banks, `margin` cells or less outside of the grid.
     const point = (margin) => {
-      const x = -margin + random() * (grid.width + 2 * margin);
-      const near = random() < 0.5;
-      const z = near ? -margin + random() * (nearEdge + margin - 0.2) : farEdge + 0.2 + random() * (zEnd - farEdge + margin);
-      return [x, z];
+      for (;;) {
+        const x = -margin + random() * (grid.width + 2 * margin);
+        const z = -margin + random() * (zEnd + 2 * margin);
+        const row = Math.round(z / ROW_STEP);
+        const col = Math.round(x - 0.5 * (row & 1));
+        // Not on the river, and not on the last part of a cell at the river.
+        if (terrain.isBank(row, col) && terrain.isBank(row + 1, col) && terrain.isBank(row - 1, col)) return [x, z];
+      }
     };
-    const push = (list, x, yy, z, turn, sx, sy, sz, color, alpha = 1) => list.push(x, yy, z, turn, sx, sy, sz, color[0], color[1], color[2], alpha);
-
     // The grass, the stones and the nest do not move. They are one shape, made one time:
     // position (3), normal (3), color (3) and wind (1) for each vertex.
     const vertices = [];
@@ -479,7 +502,7 @@ export class Renderer {
     };
 
     const blade = shapes.grassMesh();
-    for (let i = 0; i < 4200; i++) {
+    for (let i = 0; i < 5200; i++) {
       const [x, z] = point(7);
       if (!clear(x, z)) continue;
       const size = 0.8 + random() * 1.1;
@@ -506,10 +529,6 @@ export class Renderer {
     }
     this.setScenery(new Float32Array(vertices), new Uint32Array(indices));
 
-    const holes = [];
-    push(holes, nest[0], 0.035, nest[1], 0, 0.52, 1, 0.52, [0.07, 0.05, 0.04], 0.92);
-    push(holes, food[0], 0.02, food[1], 0, 1.25, 1, 1.25, [0, 0, 0], 0.22);
-    this.fill("holes", new Float32Array(holes), 2);
 
     // The places of the pieces of food in the pile and at the nest. The low pieces are first.
     const heap = (count, radius, top) => {
@@ -525,11 +544,13 @@ export class Renderer {
     this.nestPieces = heap(40, 0.45, 0.4);
   }
 
-  // The pile of food and the food at the nest.
-  setFood(pile, units, nest) {
+  // The pile of food, the light above it, and the food at the nest.
+  setFood(world) {
+    const grid = world.grid;
+    const at = [grid.x(world.pile.cell), grid.z(world.pile.cell)];
     const data = [];
-    const pileCount = Math.ceil((pile / Math.max(1, units)) * this.pilePieces.length);
-    const nestCount = Math.min(this.nestPieces.length, nest);
+    const pileCount = Math.ceil((world.pile.units / Math.max(1, world.pileUnits)) * this.pilePieces.length);
+    const nestCount = Math.min(this.nestPieces.length, world.foodNest);
     const add = (pieces, count, x, z, size) => {
       for (let i = 0; i < count; i++) {
         const [px, py, pz, turn, scale] = pieces[i];
@@ -537,11 +558,17 @@ export class Renderer {
         data.push(x + px, py + s * 0.55, z + pz, turn, s, s * 0.85, s, FOOD_COLOR[0], FOOD_COLOR[1] + 0.08 * Math.sin(i), FOOD_COLOR[2], 1);
       }
     };
-    add(this.pilePieces, pileCount, this.foodAt[0], this.foodAt[1], 0.21);
+    add(this.pilePieces, pileCount, at[0], at[1], 0.21);
     add(this.nestPieces, nestCount, this.nest[0] - 1.15, this.nest[1] + 0.25, 0.11);
     this.fill("food", new Float32Array(data), data.length / MESH_STRIDE);
-    const beam = pile > 0 ? [this.foodAt[0], 0.2, this.foodAt[1], 0.6, 0.32, 8, 0.32, 1.0, 0.82, 0.4, 0.3] : [];
+    const beam = world.pile.units > 0 ? [at[0], 0.2, at[1], 0.6, 0.36, 9, 0.36, 1.0, 0.82, 0.4, 0.34] : [];
     this.fill("beam", new Float32Array(beam), beam.length / MESH_STRIDE);
+    // The dark hole of the nest and the shadow of the pile.
+    const holes = [
+      this.nest[0], 0.035, this.nest[1], 0, 0.52, 1, 0.52, 0.07, 0.05, 0.04, 0.92,
+      at[0], 0.02, at[1], 0, 1.25, 1, 1.25, 0, 0, 0, 0.22,
+    ];
+    this.fill("holes", new Float32Array(holes), 2);
   }
 
   setScent(world) {
@@ -640,7 +667,10 @@ export class Renderer {
     // The ground and the water.
     const grid = this.grid;
     start(this.ground);
-    gl.uniform4f(this.ground.uniforms.uGrid, grid.width, grid.rows, grid.nearRows, grid.nearRows + grid.gapRows);
+    gl.uniform2f(this.ground.uniforms.uGrid, grid.width, grid.rows);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.bankTexture);
+    gl.uniform1i(this.ground.uniforms.uBank, 1);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.scentTexture);
     gl.uniform1i(this.ground.uniforms.uScent, 0);
@@ -666,20 +696,25 @@ export class Renderer {
     gl.depthMask(false);
     gl.uniform1i(this.shape.uniforms.uMode, 1);
     instances("holes");
-    instances("shadows");
+    instances("decks");
     gl.depthMask(true);
     gl.disable(gl.BLEND);
 
     start(this.body);
     instances("bodies");
 
-    // The marks of the cells where a lock is possible, and the light above the food.
+    // The shadows of the free bodies, on the ground and on the bodies of a bridge.
     gl.enable(gl.BLEND);
     gl.depthMask(false);
     start(this.shape);
     gl.uniform1i(this.shape.uniforms.uMode, 1);
+    instances("shadows");
+
+    // The marks of the cells where a lock is possible, the marks of the reach, and the
+    // light above the pile.
     instances("cells");
     instances("rings");
+    instances("marks");
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
     gl.uniform1i(this.shape.uniforms.uMode, 2);
     instances("beam");

@@ -55,7 +55,7 @@ export function colorOf(name) {
   let color = colors.get(name);
   if (!color) {
     const value = hash(name);
-    // Bright colors. The workers are dark, thus a player is easy to see.
+    // Bright colors. The workers are dark and the helpers are grey, thus a player is easy to see.
     color = hsl((value % 360) / 360, 0.78, 0.5 + ((value >>> 9) % 10) / 100);
     colors.set(name, color);
   }
@@ -68,3 +68,6 @@ export function cssColor(color) {
 
 // The plain color of all workers.
 export const WORKER_COLOR = [0.2, 0.115, 0.075];
+
+// A helper is grey: it is not a person.
+export const HELPER_COLOR = [0.62, 0.64, 0.66];

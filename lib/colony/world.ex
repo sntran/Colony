@@ -276,10 +276,10 @@ defmodule Colony.World do
     case world.players do
       %{^id => %{state: :alive, helper: nil} = player} ->
         distance = :math.sqrt((x - player.x) ** 2 + (z - player.z) ** 2)
-        cell = Grid.cell_at(world.grid, x, z)
+        cell = stand_cell(world, x, z)
         player = %{player | heading: heading, scent: scent?}
 
-        if cell != nil and walkable?(world, cell) and distance <= player.budget + 0.05 and
+        if cell != nil and distance <= player.budget + 0.05 and
              clear_way?(world, player.x, player.z, x, z, distance) do
           world = if cell != player.cell, do: cross(world, cell), else: world
           player = %{player | x: x, z: z, cell: cell, budget: max(0.0, player.budget - distance)}
@@ -292,6 +292,19 @@ defmodule Colony.World do
       _ ->
         world
     end
+  end
+
+  # The cell where a body at a point stands, or nil if a body cannot be there.
+  #
+  # A position in a message has 3 decimals. A body that is exactly on the edge of its cell
+  # can thus be a very small distance outside of it. Such a body stands on its cell.
+  @edge 0.004
+  defp stand_cell(world, x, z) do
+    Enum.find_value([{0.0, 0.0}, {@edge, 0.0}, {-@edge, 0.0}, {0.0, @edge}, {0.0, -@edge}], fn {dx,
+                                                                                                dz} ->
+      cell = Grid.cell_at(world.grid, x + dx, z + dz)
+      if cell != nil and walkable?(world, cell), do: cell
+    end)
   end
 
   # True if each point along the straight way is on a cell where a body can be, or very

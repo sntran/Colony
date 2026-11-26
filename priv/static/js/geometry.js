@@ -40,13 +40,20 @@ export function noiseFrom(seed) {
 // ---------------------------------------------------------------------------
 // The body: three ellipsoids and six legs.
 //
-// Each vertex has: position (3), normal (3), and three values for the movement:
-// weight (0 at the body, 1 at the foot), step group (0 or 1) and shade.
+// Each vertex has 13 numbers:
+//   position (3) and normal (3) of a body that walks
+//   weight (0 at the body, 1 at the foot), step group (0 or 1) and shade
+//   position (3) of a body that is locked, and the number of the leg (-1 for the body)
+//
+// A locked body is flat and low. Each of its 6 legs goes in one of the 6 directions of
+// the cells that it touches: to the body or to the bank that is there.
+
+const VERTEX = 13;
 
 function ellipsoid(out, center, radius, shade) {
   const segments = 8;
   const rings = 5;
-  const base = out.vertices.length / 9;
+  const base = out.vertices.length / VERTEX;
   for (let ring = 0; ring <= rings; ring++) {
     const v = (ring / rings) * Math.PI;
     for (let segment = 0; segment <= segments; segment++) {
@@ -56,10 +63,15 @@ function ellipsoid(out, center, radius, shade) {
       const nz = Math.sin(v) * Math.sin(u);
       // The normal of an ellipsoid: the direction divided by the radius.
       const length = Math.hypot(nx / radius[0], ny / radius[1], nz / radius[2]);
+      const x = center[0] + nx * radius[0];
+      const y = center[1] + ny * radius[1];
+      const z = center[2] + nz * radius[2];
       out.vertices.push(
-        center[0] + nx * radius[0], center[1] + ny * radius[1], center[2] + nz * radius[2],
+        x, y, z,
         nx / radius[0] / length, ny / radius[1] / length, nz / radius[2] / length,
-        0, 0, shade
+        0, 0, shade,
+        // Locked: wider, longer and half as high.
+        x * 1.45, 0.03 + y * 0.5, z * 1.2, -1
       );
     }
   }
@@ -73,9 +85,8 @@ function ellipsoid(out, center, radius, shade) {
   }
 }
 
-// One part of a leg: a thin bar with three sides.
-function bar(out, from, to, weightFrom, weightTo, group, thickness) {
-  const base = out.vertices.length / 9;
+// The 6 corners of one part of a leg: a thin bar with three sides, from a point to a point.
+function barPoints(from, to, thickness) {
   const axis = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
   const length = Math.hypot(...axis);
   const a = axis.map((part) => part / length);
@@ -84,18 +95,35 @@ function bar(out, from, to, weightFrom, weightTo, group, thickness) {
   const uLength = Math.hypot(...u);
   u = u.map((part) => part / uLength);
   const v = [a[1] * u[2] - a[2] * u[1], a[2] * u[0] - a[0] * u[2], a[0] * u[1] - a[1] * u[0]];
-  for (const [point, weight, size] of [[from, weightFrom, thickness], [to, weightTo, thickness * 0.7]]) {
+  const points = [];
+  for (const [point, size] of [[from, thickness], [to, thickness * 0.7]]) {
     for (let side = 0; side < 3; side++) {
       const angle = (side / 3) * 2 * Math.PI;
       const n = [0, 1, 2].map((i) => u[i] * Math.cos(angle) + v[i] * Math.sin(angle));
-      out.vertices.push(point[0] + n[0] * size, point[1] + n[1] * size, point[2] + n[2] * size, n[0], n[1], n[2], weight, group, 0.55);
+      points.push({ position: [point[0] + n[0] * size, point[1] + n[1] * size, point[2] + n[2] * size], normal: n });
     }
+  }
+  return points;
+}
+
+// One part of a leg, for a body that walks (`walk`) and for a locked body (`lock`).
+function bar(out, walk, lock, weights, group, leg) {
+  const base = out.vertices.length / VERTEX;
+  const a = barPoints(walk[0], walk[1], walk[2]);
+  const b = barPoints(lock[0], lock[1], lock[2]);
+  for (let i = 0; i < 6; i++) {
+    out.vertices.push(...a[i].position, ...a[i].normal, weights[i < 3 ? 0 : 1], group, 0.55, ...b[i].position, leg);
   }
   for (let side = 0; side < 3; side++) {
     const next = (side + 1) % 3;
     out.indices.push(base + side, base + 3 + side, base + next, base + next, base + 3 + side, base + 3 + next);
   }
 }
+
+// The direction to each of the 6 cells that touch a cell, as [x, z]. The numbers of the
+// directions are the numbers of hex.js: 0 right, 1 left, 2 next row right, 3 next row
+// left, 4 row before right, 5 row before left.
+const DIRECTIONS = [[1, 0], [-1, 0], [0.5, ROW_STEP], [-0.5, ROW_STEP], [0.5, -ROW_STEP], [-0.5, -ROW_STEP]];
 
 export function bodyMesh() {
   const out = { vertices: [], indices: [] };
@@ -104,22 +132,29 @@ export function bodyMesh() {
   ellipsoid(out, [0, 0.12, 0.02], [0.075, 0.07, 0.115], 1.0);
   ellipsoid(out, [0, 0.135, 0.2], [0.09, 0.075, 0.09], 1.08);
 
-  // hip, knee, foot of the three legs on one side.
+  // hip, knee, foot of the three legs on one side, and the direction of each leg of a
+  // locked body: the front legs go to the next row, the middle legs to the sides, the
+  // back legs to the row before.
   const legs = [
-    [[0.05, 0.11, 0.09], [0.17, 0.2, 0.19], [0.27, 0, 0.3]],
-    [[0.06, 0.11, 0.02], [0.21, 0.21, 0.02], [0.33, 0, 0.0]],
-    [[0.05, 0.11, -0.05], [0.18, 0.2, -0.16], [0.28, 0, -0.32]],
+    [[0.05, 0.11, 0.09], [0.17, 0.2, 0.19], [0.27, 0, 0.3], [2, 3]],
+    [[0.06, 0.11, 0.02], [0.21, 0.21, 0.02], [0.33, 0, 0.0], [0, 1]],
+    [[0.05, 0.11, -0.05], [0.18, 0.2, -0.16], [0.28, 0, -0.32], [4, 5]],
   ];
-  legs.forEach(([hip, knee, foot], index) => {
+  legs.forEach(([hip, knee, foot, directions], index) => {
     for (const side of [1, -1]) {
       // Three legs move together: front and back of one side with the middle of the other side.
       const group = (index + (side > 0 ? 0 : 1)) % 2;
       const mirror = (point) => [point[0] * side, point[1], point[2]];
-      bar(out, mirror(hip), mirror(knee), 0, 0.5, group, 0.02);
-      bar(out, mirror(knee), mirror(foot), 0.5, 1, group, 0.016);
+      const leg = directions[side > 0 ? 0 : 1];
+      const [dx, dz] = DIRECTIONS[leg];
+      // The leg of a locked body goes flat from the body to the edge of the cell, and a
+      // small distance more: it gets to the leg of the body in the next cell.
+      const at = (distance, y) => [dx * distance, y, dz * distance];
+      bar(out, [mirror(hip), mirror(knee), 0.02], [at(0.06, 0.07), at(0.3, 0.1), 0.045], [0, 0.5], group, leg);
+      bar(out, [mirror(knee), mirror(foot), 0.016], [at(0.3, 0.1), at(0.54, 0.05), 0.04], [0.5, 1], group, leg);
     }
   });
-  return { vertices: new Float32Array(out.vertices), indices: new Uint16Array(out.indices), stride: 9 };
+  return { vertices: new Float32Array(out.vertices), indices: new Uint16Array(out.indices), stride: VERTEX };
 }
 
 // ---------------------------------------------------------------------------
@@ -230,31 +265,27 @@ export function beamMesh() {
 }
 
 // ---------------------------------------------------------------------------
-// The ground: two banks, the walls of the gap and the land around them.
+// The ground: two banks, the walls of the river and the land around them.
 //
-// Each vertex has: position (3), normal (3) and color (3).
+// Each bank cell is one hexagon, thus the edge of the ground is exactly the edge of the
+// cells where a body can be. Each vertex has: position (3), normal (3) and color (3).
 
 export const GAP_DEPTH = 3.4;
 
+// Columns and rows of land around the grid. The fog hides the end of this land.
+const LAND_COLUMNS = 20;
+const LAND_ROWS_BEFORE = 16;
+const LAND_ROWS_AFTER = 12;
+
 export function terrainMesh(grid, seed) {
   const noise = noiseFrom(seed);
-  const pad = 26;
-  const step = 0.5;
-  const columns = Math.round((grid.width + 2 * pad) / step);
-  const x0 = -pad;
-  const nearEdgeRow = grid.nearRows - 1;
-  const farEdgeRow = grid.nearRows + grid.gapRows;
-  const tip = 1 / Math.sqrt(3);
+  const size = 1 / Math.sqrt(3);
   const zEnd = (grid.rows - 1) * ROW_STEP;
 
-  // The edge of a bank follows the sides of the cells of its last row.
-  const edge = (row, k, sign) => {
-    const isTip = ((k - (row & 1)) & 1) === 0;
-    return row * ROW_STEP + sign * (isTip ? tip : tip / 2);
-  };
-
-  const vertices = [];
-  const indices = [];
+  // The width of the river in a column. Outside of the grid, the river continues with
+  // the width of the first or the last column.
+  const river = (col) => grid.river[Math.max(0, Math.min(grid.width - 1, col))];
+  const isBank = (row, col) => row < grid.nearRows || row >= grid.nearRows + river(col);
 
   // The height and the color of the ground at a point.
   const height = (x, z) => {
@@ -273,72 +304,87 @@ export function terrainMesh(grid, seed) {
     const mixed = [0, 1, 2].map((i) => grass[i] + (dirt[i] - grass[i]) * d);
     return [0, 1, 2].map((i) => mixed[i] + (rock[i] - mixed[i]) * wall);
   };
-
-  const bank = (zFrom, edgeRow, sign) => {
-    // `sign` is 1 for the near bank (the edge is at its high z) and -1 for the far bank.
-    const depth = Math.abs(edgeRow * ROW_STEP + sign * tip - zFrom);
-    const rows = Math.ceil(depth / step);
-    const base = vertices.length / 9;
-    const wallRows = 4;
-    for (let j = 0; j <= rows + wallRows; j++) {
-      for (let k = 0; k <= columns; k++) {
-        const x = x0 + k * step;
-        const zEdge = edge(edgeRow, Math.round(x / step), sign);
-        let z;
-        let y;
-        let wall = 0;
-        if (j <= rows) {
-          // The top of the bank. The last line of vertices is on the edge.
-          const flat = zFrom + sign * j * step;
-          z = j === rows ? zEdge : sign * flat < sign * zEdge - 0.2 ? flat : zEdge - sign * 0.2;
-          y = height(x, z);
-          wall = Math.max(0, 1 - Math.abs(zEdge - z) / 0.45) * 0.55;
-        } else {
-          // The wall of the gap, with rough rock.
-          const part = (j - rows) / wallRows;
-          const rough = noise(x * 0.9 + 70, part * 3.1) - 0.5;
-          z = zEdge + sign * (0.15 * part + rough * 0.35 * Math.sin(part * Math.PI));
-          y = -GAP_DEPTH * 1.15 * part;
-          wall = 1;
-        }
-        vertices.push(x, y, z, 0, 0, 0, ...color(x, z, wall));
-      }
-    }
-    for (let j = 0; j < rows + wallRows; j++) {
-      for (let k = 0; k < columns; k++) {
-        const a = base + j * (columns + 1) + k;
-        const b = a + columns + 1;
-        if (sign > 0) indices.push(a, b, a + 1, a + 1, b, b + 1);
-        else indices.push(a, a + 1, b, a + 1, b + 1, b);
-      }
-    }
+  // The normal of the ground at a point, from the height near it.
+  const normal = (x, z) => {
+    const e = 0.2;
+    const n = [height(x - e, z) - height(x + e, z), 2 * e, height(x, z - e) - height(x, z + e)];
+    const length = Math.hypot(...n);
+    return n.map((part) => part / length);
   };
 
-  bank(-pad, nearEdgeRow, 1);
-  bank(zEnd + pad, farEdgeRow, -1);
+  const vertices = [];
+  const indices = [];
+  const push = (x, y, z, n, c) => {
+    vertices.push(x, y, z, n[0], n[1], n[2], c[0], c[1], c[2]);
+    return vertices.length / 9 - 1;
+  };
 
-  // The normals: the sum of the normals of the triangles at each vertex.
-  for (let i = 0; i < indices.length; i += 3) {
-    const [a, b, c] = [indices[i] * 9, indices[i + 1] * 9, indices[i + 2] * 9];
-    const ux = vertices[b] - vertices[a];
-    const uy = vertices[b + 1] - vertices[a + 1];
-    const uz = vertices[b + 2] - vertices[a + 2];
-    const vx = vertices[c] - vertices[a];
-    const vy = vertices[c + 1] - vertices[a + 1];
-    const vz = vertices[c + 2] - vertices[a + 2];
-    const n = [uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx];
-    for (const vertex of [a, b, c]) {
-      vertices[vertex + 3] += n[0];
-      vertices[vertex + 4] += n[1];
-      vertices[vertex + 5] += n[2];
+  // The cell that touches the side `i` of a cell: the side from corner i to corner i + 1.
+  // Corner i is at the angle 30 + 60 * i degrees.
+  const beside = (row, col, i) => {
+    const shift = row & 1;
+    return [
+      [row + 1, col + shift], [row + 1, col + shift - 1], [row, col - 1],
+      [row - 1, col + shift - 1], [row - 1, col + shift], [row, col + 1],
+    ][i];
+  };
+
+  for (let row = -LAND_ROWS_BEFORE; row < grid.rows + LAND_ROWS_AFTER; row++) {
+    for (let col = -LAND_COLUMNS; col < grid.width + LAND_COLUMNS; col++) {
+      if (!isBank(row, col)) continue;
+      const cx = col + 0.5 * (row & 1);
+      const cz = row * ROW_STEP;
+      const corners = [];
+      const walls = [];
+      for (let i = 0; i < 6; i++) {
+        const [r, c] = beside(row, col, i);
+        walls.push(!isBank(r, c));
+      }
+      for (let i = 0; i < 6; i++) {
+        const angle = ((30 + 60 * i) * Math.PI) / 180;
+        const x = cx + Math.cos(angle) * size;
+        const z = cz + Math.sin(angle) * size;
+        // The ground near the river is rock.
+        const edge = walls[i] || walls[(i + 5) % 6] ? 0.55 : 0;
+        corners.push({ x, z, y: height(x, z), index: push(x, height(x, z), z, normal(x, z), color(x, z, edge)) });
+      }
+      const rim = walls.some(Boolean) ? 0.25 : 0;
+      const center = push(cx, height(cx, cz), cz, normal(cx, cz), color(cx, cz, rim));
+      for (let i = 0; i < 6; i++) indices.push(center, corners[(i + 1) % 6].index, corners[i].index);
+
+      // The wall of the river below each side that touches the river, with rough rock.
+      for (let i = 0; i < 6; i++) {
+        if (!walls[i]) continue;
+        const a = corners[i];
+        const b = corners[(i + 1) % 6];
+        const out = [(a.x + b.x) / 2 - cx, (a.z + b.z) / 2 - cz];
+        const length = Math.hypot(...out);
+        const n = [out[0] / length, 0.25, out[1] / length];
+        const parts = 3;
+        let before = null;
+        for (let part = 0; part <= parts; part++) {
+          const t = part / parts;
+          const line = [a, b].map((corner) => {
+            const rough = (noise(corner.x * 0.9 + 70, corner.z * 0.9 + t * 3.1) - 0.5) * 0.3 * Math.sin(t * Math.PI);
+            const x = corner.x + n[0] * (0.16 * t + rough);
+            const z = corner.z + n[2] * (0.16 * t + rough);
+            return push(x, corner.y - (corner.y + GAP_DEPTH * 1.15) * t, z, n, color(x, z, 1));
+          });
+          if (before) indices.push(before[0], before[1], line[0], before[1], line[1], line[0]);
+          before = line;
+        }
+      }
     }
   }
-  for (let i = 0; i < vertices.length; i += 9) {
-    const length = Math.hypot(vertices[i + 3], vertices[i + 4], vertices[i + 5]) || 1;
-    vertices[i + 3] /= length;
-    vertices[i + 4] /= length;
-    vertices[i + 5] /= length;
-  }
 
-  return { vertices: new Float32Array(vertices), indices: new Uint32Array(indices), stride: 9, height, pad };
+  return {
+    vertices: new Float32Array(vertices),
+    indices: new Uint32Array(indices),
+    stride: 9,
+    height,
+    isBank,
+    columns: LAND_COLUMNS,
+    rowsBefore: LAND_ROWS_BEFORE,
+    rowsAfter: LAND_ROWS_AFTER,
+  };
 }

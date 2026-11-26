@@ -274,6 +274,25 @@ defmodule Colony.BridgeTest do
       assert World.move(hole, id, x, z - 0.45, 0.0, false).players[id].cell == first
     end
 
+    test "a body on the edge of its cell stands on that cell", %{world: world, id: id} do
+      # A position in a message has 3 decimals. On the edge of a cell, the position can be
+      # a very small distance in the river.
+      edge = Grid.cell(world.grid, 13, @col)
+      world = Sim.walk(world, id, edge)
+      {x, z} = Grid.center(world.grid, edge)
+      tip = z + 1 / :math.sqrt(3)
+
+      world = World.move(world, id, x, tip - 0.001, 0.0, false)
+      assert_in_delta world.players[id].z, tip - 0.001, 1.0e-9
+      world = world |> Sim.run(3) |> World.move(id, x, tip + 0.002, 0.0, false)
+      assert_in_delta world.players[id].z, tip + 0.002, 1.0e-9
+      assert world.players[id].cell == edge
+
+      # A larger distance in the river is not possible.
+      world = world |> Sim.run(3) |> World.move(id, x, tip + 0.02, 0.0, false)
+      assert_in_delta world.players[id].z, tip + 0.002, 1.0e-9
+    end
+
     test "a locked body stays: no rule removes it", %{world: world, id: id} do
       world =
         Enum.reduce(1..4, world, fn n, world ->

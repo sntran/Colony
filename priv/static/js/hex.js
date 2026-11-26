@@ -2,6 +2,9 @@
 //
 // A cell is an integer: row * width + column. The rows with an odd number are moved half a
 // cell to the right. The distance between the centers of two cells that touch is 1.
+//
+// The near bank has a straight edge. The river has a width for each column, thus the edge
+// of the far bank is not straight.
 
 export const ROW_STEP = Math.sqrt(3) / 2;
 
@@ -10,13 +13,13 @@ export const GAP = 1;
 export const FAR = 2;
 
 export class Grid {
-  constructor(width, nearRows, gapRows, farRows) {
+  // river: the width of the river in each column.
+  constructor(width, nearRows, rows, river) {
     this.width = width;
     this.nearRows = nearRows;
-    this.gapRows = gapRows;
-    this.farRows = farRows;
-    this.rows = nearRows + gapRows + farRows;
-    this.count = width * this.rows;
+    this.rows = rows;
+    this.river = river;
+    this.count = width * rows;
   }
 
   row(cell) {
@@ -30,8 +33,13 @@ export class Grid {
   kind(cell) {
     const row = Math.floor(cell / this.width);
     if (row < this.nearRows) return NEAR;
-    if (row < this.nearRows + this.gapRows) return GAP;
+    if (row < this.nearRows + this.river[cell % this.width]) return GAP;
     return FAR;
+  }
+
+  // The row of a river cell, from 1 at the near bank.
+  riverRow(cell) {
+    return Math.floor(cell / this.width) - this.nearRows + 1;
   }
 
   x(cell) {
@@ -86,5 +94,19 @@ export class Grid {
       if (next >= 0) list.push(next);
     }
     return list;
+  }
+
+  // The cell in the next row that has the same column number: a straight line across the river.
+  straight(cell) {
+    return this.neighbor(cell, Math.floor(cell / this.width) & 1 ? 3 : 2);
+  }
+
+  // True if a river cell touches a bank cell.
+  touchesBank(cell) {
+    for (let direction = 0; direction < 6; direction++) {
+      const next = this.neighbor(cell, direction);
+      if (next >= 0 && this.kind(next) !== GAP) return true;
+    }
+    return false;
   }
 }

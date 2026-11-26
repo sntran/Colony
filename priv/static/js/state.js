@@ -4,21 +4,22 @@
 // keeps the positions that the page draws. lib/colony/protocol.ex tells the format.
 
 import { Grid, GAP } from "./hex.js";
-import { colorOf, WORKER_COLOR } from "./names.js";
+import { colorOf, WORKER_COLOR, HELPER_COLOR } from "./names.js";
 
 const MAX_WORKERS = 8192;
 
 // Floats for each body in the list that the renderer gets:
-// x, y, z, scale; cos and sin of the heading, cos and sin of the tilt;
-// red, green, blue, lock; sin and cos of the walk phase, 0, shake.
+// x, y, z, scale; cos and sin of the heading, 0, 0;
+// red, green, blue, lock; sin and cos of the walk phase, legs, shake.
+// `legs` has one bit for each leg of a locked body: the leg goes out if a body or a bank
+// is in that direction.
 export const BODY_STRIDE = 16;
 // Floats for each plain shape: x, y, z, turn, scale x, scale y, scale z, red, green, blue, alpha.
 export const MESH_STRIDE = 11;
 
 // A free body on a locked body is this much above the ground.
-const BRIDGE_HEIGHT = 0.13;
+const BRIDGE_HEIGHT = 0.1;
 const FOOD_COLOR = [1.0, 0.74, 0.2];
-const LOCKED_WORKER_COLOR = [0.3, 0.18, 0.11];
 
 function hash01(value) {
   let x = Math.imul(value ^ 0x9e3779b9, 0x85ebca6b);
@@ -35,6 +36,12 @@ function turnToward(from, to, amount) {
   return from + difference * Math.min(1, amount);
 }
 
+// The color of a locked body: the color of its player, darker. A bridge is a structure,
+// and the free bodies on it must be easy to see.
+function lockedColor(color) {
+  return [color[0] * 0.62 + 0.03, color[1] * 0.62 + 0.03, color[2] * 0.62 + 0.03];
+}
+
 export class World {
   constructor() {
     this.ready = false;
@@ -45,7 +52,9 @@ export class World {
     this.speed = 4;
     this.rate = 10;
     this.decayTicks = 10;
-    this.foodUnits = 500;
+    this.pileUnits = 300;
+    // The numbers of the support rule: see support.js.
+    this.rule = { bank: 96, costs: [12, 6, 4, 3] };
 
     this.workers = {
       alive: new Uint8Array(MAX_WORKERS),
@@ -61,22 +70,24 @@ export class World {
     this.freeWorkers = 0;
 
     this.players = new Map();
+    // id => { name, helper }
     this.names = new Map();
+    // cell => locked body
     this.locked = new Map();
     this.lockInfo = new Map();
-    this.workerCell = new Map();
-    this.frontier = new Set();
+    // This number changes each time the locked bodies change.
+    this.structure = 0;
     this.scent = new Uint8Array(0);
     this.scentDirty = true;
-    this.foodPile = 0;
+    this.pile = { id: 0, cell: 0, units: 0 };
     this.foodNest = 0;
     this.foodDirty = true;
-    this.ghosts = [];
-    this.gone = new Map();
     this.time = 0;
 
     // The body of this player. The page moves it; the server checks the moves.
-    this.me = { alive: false, x: 0, y: 0, z: 0, heading: 0, phase: 0, scent: false, name: "", color: [1, 1, 1] };
+    // `slide` is the distance from the place where the picture of the body is to the
+    // place where the body is: after a lock, the picture goes smoothly to the new body.
+    this.me = { alive: false, x: 0, y: 0, z: 0, heading: 0, phase: 0, scent: false, name: "", color: [1, 1, 1], slideX: 0, slideZ: 0 };
 
     this.bodies = new Float32Array(BODY_STRIDE * 4096);
     this.bodyCount = 0;
@@ -84,6 +95,8 @@ export class World {
     this.shadowCount = 0;
     this.crumbs = new Float32Array(MESH_STRIDE * 4096);
     this.crumbCount = 0;
+    this.decks = new Float32Array(MESH_STRIDE * 1024);
+    this.deckCount = 0;
   }
 
   // ---------------------------------------------------------------------------
@@ -116,9 +129,7 @@ export class World {
     this.names.clear();
     this.locked.clear();
     this.lockInfo.clear();
-    this.workerCell.clear();
-    this.frontier.clear();
-    this.ghosts.length = 0;
+    this.structure++;
     this.scent.fill(0);
     this.scentDirty = true;
     this.foodDirty = true;
@@ -130,7 +141,6 @@ export class World {
     const w = this.workers;
     let o = 4;
     this.tick = view.getUint32(0, true);
-    this.gone.clear();
 
     if (!snapshot) {
       // The server subtracts 1 from each scent at these ticks. The page does the same.
@@ -149,26 +159,36 @@ export class World {
 
       switch (tag) {
         case 1: {
-          const grid = new Grid(view.getUint16(o, true), view.getUint8(o + 2), view.getUint8(o + 3), view.getUint8(o + 4));
-          this.grid = grid;
-          this.nest = view.getUint16(o + 5, true);
-          this.food = view.getUint16(o + 7, true);
-          this.seed = view.getUint32(o + 9, true);
-          this.you = view.getUint16(o + 13, true);
-          this.rate = view.getUint8(o + 15);
-          this.speed = view.getUint8(o + 16) / 10;
-          this.decayTicks = view.getUint16(o + 17, true);
-          this.foodUnits = view.getUint16(o + 19, true);
-          if (this.scent.length !== grid.count) this.scent = new Uint8Array(grid.count);
-          o += 21;
+          const width = view.getUint16(o, true);
+          const nearRows = view.getUint8(o + 2);
+          const rows = view.getUint8(o + 3);
+          this.nest = view.getUint16(o + 4, true);
+          this.seed = view.getUint32(o + 6, true);
+          this.you = view.getUint16(o + 10, true);
+          this.rate = view.getUint8(o + 12);
+          this.speed = view.getUint8(o + 13) / 10;
+          this.decayTicks = view.getUint16(o + 14, true);
+          this.pileUnits = view.getUint16(o + 16, true);
+          const bank = view.getUint8(o + 18);
+          const costCount = view.getUint8(o + 19);
+          o += 20;
+          const costs = [];
+          for (let i = 0; i < costCount; i++) costs.push(view.getUint8(o + i));
+          o += costCount;
+          this.rule = { bank, costs };
+          const river = new Uint8Array(buffer.slice(o, o + width));
+          o += width;
+          this.grid = new Grid(width, nearRows, rows, river);
+          if (this.scent.length !== this.grid.count) this.scent = new Uint8Array(this.grid.count);
           break;
         }
         case 2:
           for (let i = 0; i < count; i++) {
             const id = view.getUint16(o, true);
-            const size = view.getUint8(o + 2);
-            this.names.set(id, text.decode(new Uint8Array(buffer, o + 3, size)));
-            o += 3 + size;
+            const helper = view.getUint8(o + 2) === 1;
+            const size = view.getUint8(o + 3);
+            this.names.set(id, { name: text.decode(new Uint8Array(buffer, o + 4, size)), helper });
+            o += 4 + size;
           }
           break;
         case 3:
@@ -190,59 +210,37 @@ export class World {
           break;
         case 5:
           for (let i = 0; i < count; i++) {
-            const id = view.getUint16(o, true);
-            if (w.alive[id]) this.gone.set(id, [w.x[id], w.z[id]]);
-            w.alive[id] = 0;
+            w.alive[view.getUint16(o, true)] = 0;
             o += 2;
           }
           break;
         case 6:
           for (let i = 0; i < count; i++) {
             const cell = view.getUint16(o, true);
-            const kind = view.getUint8(o + 2);
+            const helper = view.getUint8(o + 2) === 2;
             const id = view.getUint16(o + 3, true);
             const time = view.getUint32(o + 5, true);
             const size = view.getUint8(o + 9);
             const name = text.decode(new Uint8Array(buffer, o + 10, size));
             o += 10 + size;
-            this.lockInfo.set(cell, { kind, id, time, name, from: snapshot ? null : this.lockStart(kind, id) });
-            if (kind === 0) this.workerCell.set(id, cell);
-          }
-          break;
-        case 7:
-          for (let i = 0; i < count; i++) {
-            const body = this.locked.get(view.getUint16(o, true));
-            if (body) this.ghosts.push({ x: body.x, y: 0, z: body.z, heading: body.heading, color: body.color, speed: 0, tilt: 0 });
-            o += 2;
+            this.lockInfo.set(cell, { helper, time, name, from: snapshot ? null : this.lockStart(id) });
           }
           break;
         case 8: {
           const locked = new Map();
           for (let i = 0; i < count; i++) {
             const cell = view.getUint16(o, true);
-            const support = view.getUint8(o + 2) / 2;
             let body = this.locked.get(cell);
             if (!body) body = this.newLocked(cell);
-            body.support = support;
+            body.support = view.getUint8(o + 2);
             locked.set(cell, body);
             o += 3;
           }
           this.locked = locked;
-          for (const [cell, info] of this.lockInfo) {
-            if (!locked.has(cell)) {
-              this.lockInfo.delete(cell);
-              if (info.kind === 0 && this.workerCell.get(info.id) === cell) this.workerCell.delete(info.id);
-            }
-          }
+          this.structure++;
+          for (const cell of this.lockInfo.keys()) if (!locked.has(cell)) this.lockInfo.delete(cell);
           break;
         }
-        case 9:
-          this.frontier.clear();
-          for (let i = 0; i < count; i++) {
-            this.frontier.add(view.getUint16(o, true));
-            o += 2;
-          }
-          break;
         case 10:
           for (let i = 0; i < count; i++) {
             this.scent[view.getUint16(o, true)] = view.getUint8(o + 2);
@@ -251,10 +249,10 @@ export class World {
           this.scentDirty = true;
           break;
         case 11:
-          this.foodPile = view.getUint16(o, true);
-          this.foodNest = view.getUint32(o + 2, true);
+          this.pile = { id: view.getUint16(o, true), cell: view.getUint16(o + 2, true), units: view.getUint16(o + 4, true) };
+          this.foodNest = view.getUint32(o + 6, true);
           this.foodDirty = true;
-          o += 6 * count;
+          o += 10 * count;
           break;
         case 12:
           for (let i = 0; i < count; i++) {
@@ -267,13 +265,15 @@ export class World {
               player = { x, y: 0, z, heading, phase: 0 };
               this.players.set(id, player);
             }
+            const known = this.names.get(id) || { name: "", helper: false };
             player.tx = x;
             player.tz = z;
             player.theading = heading;
             player.scent = view.getUint8(o + 7) === 1;
             player.seen = true;
-            player.name = this.names.get(id) || "";
-            player.color = colorOf(player.name);
+            player.name = known.name;
+            player.helper = known.helper;
+            player.color = known.helper ? HELPER_COLOR : colorOf(known.name);
             o += 8;
           }
           break;
@@ -291,25 +291,9 @@ export class World {
     const grid = this.grid;
     const wasAlive = w.alive[id] === 1;
     const jump = (flags & 2) !== 0;
-    let x = grid.x(cell) + this.offsetX(id, cell);
-    let z = grid.z(cell) + this.offsetZ(id, cell);
-
-    if (wasAlive && jump) {
-      // The worker was on a body that fell. Show the fall, then start at the new cell.
-      const under = grid.cellAt(w.x[id], w.z[id]);
-      if (under >= 0 && grid.kind(under) === GAP) {
-        this.ghosts.push({ x: w.x[id], y: w.y[id], z: w.z[id], heading: w.heading[id], color: WORKER_COLOR, speed: 0, tilt: 0 });
-      }
-    } else if (!wasAlive && !jump && this.workerCell.has(id)) {
-      // A locked worker lets go. It starts where it was locked.
-      const from = this.workerCell.get(id);
-      x = grid.x(from);
-      z = grid.z(from);
-    }
-
     if (!wasAlive || jump) {
-      w.x[id] = x;
-      w.z[id] = z;
+      w.x[id] = grid.x(cell) + this.offsetX(id, cell);
+      w.z[id] = grid.z(cell) + this.offsetZ(id, cell);
       w.y[id] = grid.kind(cell) === GAP ? BRIDGE_HEIGHT : 0;
       w.heading[id] = hash01(id * 7 + this.tick) * 2 * Math.PI;
       w.phase[id] = hash01(id) * 6;
@@ -320,30 +304,33 @@ export class World {
     if (id >= this.workerEnd) this.workerEnd = id + 1;
   }
 
+  // The player takes the body of a worker. Returns the place where the picture of that
+  // worker is, or null. The worker is not a worker after that.
+  takeWorker(id) {
+    const w = this.workers;
+    if (id === null || id === undefined || !w.alive[id]) return null;
+    w.alive[id] = 0;
+    return [w.x[id], w.z[id], w.heading[id]];
+  }
+
   // The position where a body was before its lock.
-  lockStart(kind, id) {
-    if (kind === 0) return this.gone.get(id) || null;
-    if (id === this.you) return [this.me.x, this.me.z];
+  lockStart(id) {
+    if (id === this.you) return [this.me.x + this.me.slideX, this.me.z + this.me.slideZ];
     const player = this.players.get(id);
     return player ? [player.x, player.z] : null;
   }
 
   newLocked(cell) {
-    const info = this.lockInfo.get(cell) || { kind: 0, id: 0, time: 0, name: "", from: null };
-    const x = this.grid.x(cell);
-    const z = this.grid.z(cell);
-    const turn = hash01(cell * 13 + 5);
+    const info = this.lockInfo.get(cell) || { helper: false, time: 0, name: "", from: null };
     return {
       cell,
-      x,
-      z,
-      // Each body is across the gap, with a small random turn. Some look back.
-      heading: (turn - 0.5) * 1.1 + (hash01(cell * 31 + 1) < 0.35 ? Math.PI : 0),
+      x: this.grid.x(cell),
+      z: this.grid.z(cell),
       support: 0,
-      kind: info.kind,
+      helper: info.helper,
       name: info.name,
       time: info.time,
-      color: info.kind === 1 ? colorOf(info.name) : LOCKED_WORKER_COLOR,
+      color: lockedColor(info.helper ? HELPER_COLOR : colorOf(info.name)),
       from: info.from,
       start: this.time,
     };
@@ -352,11 +339,11 @@ export class World {
   // Each worker is a small distance from the center of its cell. A line of workers
   // then does not look like one body.
   offsetX(id, cell) {
-    return (hash01(id * 2 + 1) - 0.5) * (this.grid.kind(cell) === GAP ? 0.2 : 0.5);
+    return (hash01(id * 2 + 1) - 0.5) * (this.grid.kind(cell) === GAP ? 0.3 : 0.5);
   }
 
   offsetZ(id, cell) {
-    return (hash01(id * 2 + 2) - 0.5) * (this.grid.kind(cell) === GAP ? 0.2 : 0.42);
+    return (hash01(id * 2 + 2) - 0.5) * (this.grid.kind(cell) === GAP ? 0.3 : 0.42);
   }
 
   // True if a free body can be on the point.
@@ -423,13 +410,22 @@ export class World {
       player.y += (this.heightAt(player.x, player.z) - player.y) * Math.min(1, dt * 12);
     }
 
-    for (let i = this.ghosts.length - 1; i >= 0; i--) {
-      const ghost = this.ghosts[i];
-      ghost.speed += 9 * dt;
-      ghost.y -= ghost.speed * dt;
-      ghost.tilt += 5 * dt;
-      if (ghost.y < -4.5) this.ghosts.splice(i, 1);
+    // The picture of the body of this player goes to the place of its new body.
+    const fade = Math.exp(-dt * 9);
+    this.me.slideX *= fade;
+    this.me.slideZ *= fade;
+  }
+
+  // The bits of the legs of a locked body: one for each direction that has a locked body
+  // or a bank. Its legs go out in these directions.
+  legs(cell) {
+    const grid = this.grid;
+    let bits = 0;
+    for (let direction = 0; direction < 6; direction++) {
+      const next = grid.neighbor(cell, direction);
+      if (next >= 0 && (grid.kind(next) !== GAP || this.locked.has(next))) bits |= 1 << direction;
     }
+    return bits;
   }
 
   // Makes the lists that the renderer draws. `sees(x, z)` tells if a point is in the picture.
@@ -438,42 +434,44 @@ export class World {
     let b = 0;
     let s = 0;
     let c = 0;
-    const need = this.workerEnd + this.players.size + this.locked.size + this.ghosts.length + 2;
+    let d = 0;
+    const need = this.workerEnd + this.players.size + this.locked.size + 2;
     if (need * BODY_STRIDE > this.bodies.length) {
       this.bodies = new Float32Array(need * BODY_STRIDE * 2);
       this.shadows = new Float32Array(need * MESH_STRIDE * 2);
       this.crumbs = new Float32Array(need * MESH_STRIDE * 2);
     }
+    if (this.locked.size * MESH_STRIDE > this.decks.length) {
+      this.decks = new Float32Array(this.locked.size * MESH_STRIDE * 2);
+    }
     const bodies = this.bodies;
     const shadows = this.shadows;
     const crumbs = this.crumbs;
-
+    const decks = this.decks;
     const time = this.time;
-    const body = (x, y, z, heading, color, phase, lock, strain, scale, tilt) => {
+
+    const body = (x, y, z, heading, color, phase, lock, strain, scale, legs) => {
       bodies[b++] = x; bodies[b++] = y; bodies[b++] = z; bodies[b++] = scale;
-      bodies[b++] = Math.cos(heading); bodies[b++] = Math.sin(heading);
-      bodies[b++] = tilt === 0 ? 1 : Math.cos(tilt); bodies[b++] = tilt === 0 ? 0 : Math.sin(tilt);
+      bodies[b++] = Math.cos(heading); bodies[b++] = Math.sin(heading); bodies[b++] = 1; bodies[b++] = 0;
       if (strain > 0) {
-        // A body with not much support shakes. It also goes red and back, again and again:
-        // a player with a red color sees the change.
-        const alarm = strain * lock * (0.3 + 0.2 * (1 + Math.sin(time * 7)));
-        const dark = 1 - 0.25 * strain * lock;
-        bodies[b++] = (color[0] + (1 - color[0]) * alarm) * dark;
-        bodies[b++] = (color[1] + (0.12 - color[1]) * alarm) * dark;
-        bodies[b++] = (color[2] + (0.08 - color[2]) * alarm) * dark;
+        // A body with not much support goes red and back, again and again.
+        const alarm = strain * (0.3 + 0.2 * (1 + Math.sin(time * 7)));
+        bodies[b++] = color[0] + (1 - color[0]) * alarm;
+        bodies[b++] = color[1] + (0.12 - color[1]) * alarm;
+        bodies[b++] = color[2] + (0.08 - color[2]) * alarm;
       } else {
         bodies[b++] = color[0]; bodies[b++] = color[1]; bodies[b++] = color[2];
       }
       bodies[b++] = lock;
       bodies[b++] = lock === 1 ? 0 : Math.sin(phase); bodies[b++] = lock === 1 ? 1 : Math.cos(phase);
-      bodies[b++] = 0;
-      bodies[b++] = strain > 0 ? Math.sin(time * 37 + x * 5 + z * 3) * 0.016 * strain * lock : 0;
+      bodies[b++] = legs;
+      bodies[b++] = strain > 0 ? Math.sin(time * 37 + x * 5 + z * 3) * 0.014 * strain : 0;
     };
+    // The shadow of a free body: on the ground, or on the bodies of a bridge.
     const shadow = (x, y, z, size) => {
-      if (y > 0.03) return;
-      shadows[s++] = x; shadows[s++] = 0.012; shadows[s++] = z; shadows[s++] = 0;
+      shadows[s++] = x; shadows[s++] = y + 0.012; shadows[s++] = z; shadows[s++] = 0;
       shadows[s++] = size; shadows[s++] = 1; shadows[s++] = size;
-      shadows[s++] = 0; shadows[s++] = 0; shadows[s++] = 0; shadows[s++] = 0.26;
+      shadows[s++] = 0; shadows[s++] = 0; shadows[s++] = 0; shadows[s++] = y > 0.03 ? 0.4 : 0.26;
     };
 
     for (let id = 0; id < this.workerEnd; id++) {
@@ -496,10 +494,12 @@ export class World {
 
     const me = this.me;
     if (me.alive) {
-      body(me.x, me.y, me.z, me.heading, me.color, me.phase, 0, 0, 1.12, 0);
-      shadow(me.x, me.y, me.z, 0.34);
+      body(me.x + me.slideX, me.y, me.z + me.slideZ, me.heading, me.color, me.phase, 0, 0, 1.12, 0);
+      shadow(me.x + me.slideX, me.y, me.z + me.slideZ, 0.34);
     }
 
+    // The lowest cost of the rule: a body with less support than 2 rows of this is weak.
+    const row = this.rule.costs[0];
     for (const locked of this.locked.values()) {
       if (!sees(locked.x, locked.z)) continue;
       // A new locked body moves from the place of its free body into its cell.
@@ -511,17 +511,19 @@ export class World {
         x = locked.from[0] + (x - locked.from[0]) * part;
         z = locked.from[1] + (z - locked.from[1]) * part;
       }
-      const strain = Math.max(0, Math.min(1, (2.0 - locked.support) / 1.5));
-      body(x, -0.03, z, locked.heading, locked.color, 0, 1, strain, locked.kind === 1 ? 1.12 : 1.05, 0);
-    }
-
-    for (const ghost of this.ghosts) {
-      body(ghost.x, ghost.y, ghost.z, ghost.heading, ghost.color, 0, 0.6, 1, 1, ghost.tilt);
+      const strain = Math.max(0, Math.min(1, (row - locked.support) / row + 0.4)) * (locked.support <= row ? 1 : 0);
+      // All the locked bodies look to the far bank: each leg then has one direction.
+      body(x, -0.02, z, 0, locked.color, 0, 1, strain, 1.0, this.legs(locked.cell));
+      // A dark plate below the body: the bridge is one structure.
+      decks[d++] = locked.x; decks[d++] = -0.03; decks[d++] = locked.z; decks[d++] = 0;
+      decks[d++] = 1.12; decks[d++] = 1; decks[d++] = 1.12;
+      decks[d++] = 0.05; decks[d++] = 0.04; decks[d++] = 0.035; decks[d++] = 0.55;
     }
 
     this.bodyCount = b / BODY_STRIDE;
     this.shadowCount = s / MESH_STRIDE;
     this.crumbCount = c / MESH_STRIDE;
+    this.deckCount = d / MESH_STRIDE;
   }
 
   // The number of bodies in the world: free workers, players and locked bodies.

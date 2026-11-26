@@ -5,7 +5,7 @@
 import { Socket } from "/vendor/phoenix.mjs";
 
 export class Net {
-  // handlers: snapshot(buffer), tick(buffer), you(message), status(text)
+  // handlers: snapshot(buffer), tick(buffer), you(message), records(list), record(record), status(text)
   constructor(name, demo, handlers) {
     this.handlers = handlers;
     this.bytes = 0;
@@ -34,6 +34,8 @@ export class Net {
       handlers.tick(buffer);
     });
     this.channel.on("you", (message) => handlers.you(message));
+    this.channel.on("records", (message) => handlers.records(message.records));
+    this.channel.on("record", (record) => handlers.record(record));
     this.channel.onError(() => {
       this.ready = false;
     });
@@ -47,16 +49,27 @@ export class Net {
     if (this.ready) this.channel.push("m", buffer);
   }
 
-  // Asks for a lock. Returns a promise of true or false.
-  lock(cell, at) {
+  // Sends a question and returns a promise of the reply, or of null.
+  ask(event, payload) {
     return new Promise((resolve) => {
-      if (!this.ready) return resolve(false);
+      if (!this.ready) return resolve(null);
       this.channel
-        .push("lock", { cell, at }, 3000)
-        .receive("ok", () => resolve(true))
-        .receive("error", () => resolve(false))
-        .receive("timeout", () => resolve(false));
+        .push(event, payload, 3000)
+        .receive("ok", (reply) => resolve(reply || {}))
+        .receive("error", () => resolve(null))
+        .receive("timeout", () => resolve(null));
     });
+  }
+
+  // Asks for a lock. The reply is the new body of the player, or null if the lock is not
+  // possible: { x, z, worker } for the body of a worker, { wait } with no free worker.
+  lock(cell, at) {
+    return this.ask("lock", { cell, at });
+  }
+
+  // Asks for the data of a locked body: { name, helper, time, crossings }, or null.
+  body(cell) {
+    return this.ask("body", { cell });
   }
 
   // Measures the time of a message to the server and back.
