@@ -14,15 +14,15 @@ defmodule Colony.Mirror do
             tick: 0,
             you: nil,
             decay_ticks: 10,
+            rule: nil,
+            river: [],
             workers: %{},
             structure: %{},
-            frontier: [],
             locks: %{},
             scent: %{},
             food: nil,
             players: %{},
-            names: %{},
-            fell: []
+            names: %{}
 
   @doc "Starts from a snapshot."
   def new(grid, <<tick::32-little, rest::binary>>) do
@@ -31,7 +31,7 @@ defmodule Colony.Mirror do
 
   @doc "Applies the changes of one tick."
   def apply_tick(%__MODULE__{} = mirror, <<tick::32-little, rest::binary>>) do
-    mirror = %{mirror | tick: tick, players: %{}, fell: []}
+    mirror = %{mirror | tick: tick, players: %{}}
 
     mirror =
       if rem(tick, mirror.decay_ticks) == 0 do
@@ -51,9 +51,8 @@ defmodule Colony.Mirror do
     sections(mirror, rest)
   end
 
-  # The structure and the frontier are full lists: the old values go away.
+  # The structure is a full list: the old values go away.
   defp start(mirror, 8), do: %{mirror | structure: %{}}
-  defp start(mirror, 9), do: %{mirror | frontier: []}
   defp start(mirror, _tag), do: mirror
 
   defp records(mirror, _tag, 0, rest), do: {mirror, rest}
@@ -66,14 +65,20 @@ defmodule Colony.Mirror do
   defp record(
          mirror,
          1,
-         <<_width::16, _rows::24, _nest::16, _food::16, _seed::32, you::16-little, _rate::8,
-           _speed::8, decay::16-little, _units::16, rest::binary>>
+         <<width::16-little, _near::8, _rows::8, _nest::16, _seed::32, you::16-little, _rate::8,
+           _speed::8, decay::16-little, _units::16, bank::8, n::8, costs::binary-size(n),
+           river::binary-size(width), rest::binary>>
        ) do
-    {%{mirror | you: you, decay_ticks: decay}, rest}
+    rule = %{bank: bank, costs: :binary.bin_to_list(costs)}
+    {%{mirror | you: you, decay_ticks: decay, rule: rule, river: :binary.bin_to_list(river)}, rest}
   end
 
-  defp record(mirror, 2, <<id::16-little, size::8, name::binary-size(size), rest::binary>>) do
-    {%{mirror | names: Map.put(mirror.names, id, name)}, rest}
+  defp record(
+         mirror,
+         2,
+         <<id::16-little, flags::8, size::8, name::binary-size(size), rest::binary>>
+       ) do
+    {%{mirror | names: Map.put(mirror.names, id, {name, flags == 1})}, rest}
   end
 
   defp record(mirror, 3, <<id::16-little, cell::16-little, flags::8, rest::binary>>) do
@@ -108,24 +113,20 @@ defmodule Colony.Mirror do
      rest}
   end
 
-  defp record(mirror, 7, <<cell::16-little, rest::binary>>) do
-    {%{mirror | fell: [cell | mirror.fell]}, rest}
-  end
-
   defp record(mirror, 8, <<cell::16-little, support::8, rest::binary>>) do
-    {%{mirror | structure: Map.put(mirror.structure, cell, support / 2)}, rest}
-  end
-
-  defp record(mirror, 9, <<cell::16-little, rest::binary>>) do
-    {%{mirror | frontier: [cell | mirror.frontier]}, rest}
+    {%{mirror | structure: Map.put(mirror.structure, cell, support)}, rest}
   end
 
   defp record(mirror, 10, <<cell::16-little, value::8, rest::binary>>) do
     {%{mirror | scent: Map.put(mirror.scent, cell, value)}, rest}
   end
 
-  defp record(mirror, 11, <<pile::16-little, nest::32-little, rest::binary>>) do
-    {%{mirror | food: {pile, nest}}, rest}
+  defp record(
+         mirror,
+         11,
+         <<id::16-little, cell::16-little, units::16-little, nest::32-little, rest::binary>>
+       ) do
+    {%{mirror | food: %{id: id, cell: cell, units: units, nest: nest}}, rest}
   end
 
   defp record(

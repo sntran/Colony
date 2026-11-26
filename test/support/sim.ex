@@ -5,13 +5,16 @@ defmodule Colony.Sim do
 
   alias Colony.{Grid, World}
 
-  @doc "The game config with changes for a test."
+  @doc "The game config with changes for a test: no workers and no helpers, and seed 1."
   def cfg(changes \\ []) do
     :colony
     |> Application.fetch_env!(:game)
-    |> Keyword.merge(seed: 1, workers: 0)
+    |> Keyword.merge(seed: 1, workers: 0, helpers: 0)
     |> Keyword.merge(changes)
   end
+
+  @doc "A config with a river that has the same width in all its columns."
+  def straight(rows, changes \\ []), do: cfg([river_min: rows, river_max: rows] ++ changes)
 
   @doc "Moves the world `count` ticks. The events are not kept."
   def run(world, count) do
@@ -26,28 +29,38 @@ defmodule Colony.Sim do
     end)
   end
 
-  @doc "Waits until the player has a body."
-  def wait_alive(world, id) do
-    {world, _} = run_until(world, 100, &(&1.players[id].state == :alive))
-    world
+  @doc "Waits until the player has a body that can lock."
+  def wait_ready(world, id) do
+    ready? = fn world ->
+      player = world.players[id]
+      player.state == :alive and world.tick >= player.ready_tick
+    end
+
+    if ready?.(world) do
+      world
+    else
+      {world, ticks} = run_until(world, 200, ready?)
+      true = ticks != nil
+      world
+    end
   end
 
   @doc """
   Walks the body of a player to a cell, as a client does: small steps along the cells
   where a body can be, with one tick between the steps.
   """
-  def walk(world, id, target) do
-    world = wait_alive(world, id)
+  def walk(world, id, target, scent? \\ false) do
+    world = wait_ready(world, id)
     path = path(world, world.players[id].cell, target)
     if path == nil, do: raise("no way to cell #{target}")
 
     Enum.reduce(path, world, fn cell, world ->
       {x, z} = Grid.center(world.grid, cell)
-      step_to(world, id, x, z)
+      step_to(world, id, x, z, scent?)
     end)
   end
 
-  defp step_to(world, id, x, z) do
+  defp step_to(world, id, x, z, scent?) do
     player = world.players[id]
     dx = x - player.x
     dz = z - player.z
@@ -57,17 +70,17 @@ defmodule Colony.Sim do
       world
     else
       part = min(1.0, world.p.step / distance)
-      world = World.move(world, id, player.x + dx * part, player.z + dz * part, 0.0, false)
+      world = World.move(world, id, player.x + dx * part, player.z + dz * part, 0.0, scent?)
       {world, _} = World.tick(world)
       # The world must accept each step.
       true = abs(world.players[id].x - (player.x + dx * part)) < 0.01
-      step_to(world, id, x, z)
+      step_to(world, id, x, z, scent?)
     end
   end
 
   @doc "Walks to a cell that touches `cell`, then locks into `cell`. Returns `{result, world}`."
   def walk_and_lock(world, id, cell) do
-    world = wait_alive(world, id)
+    world = wait_ready(world, id)
 
     stand =
       world.grid
@@ -116,13 +129,21 @@ defmodule Colony.Sim do
     end
   end
 
-  @doc "The cell of the gap in row `n` (1 is the row at the near bank) and in a column."
-  def gap_cell(world, n, col) do
+  @doc "The cell of the river in row `n` (1 is the row at the near bank) and in a column."
+  def river_cell(world, n, col) do
     Grid.cell(world.grid, world.grid.near_rows + n - 1, col)
   end
 
-  @doc "The locked workers."
-  def locked_workers(world) do
-    for {cell, %{kind: :worker}} <- world.locked, do: cell
+  @doc "Puts scent on the straight line from the nest to the river."
+  def scent_line(world) do
+    grid = world.grid
+    {row, col} = {Grid.row(grid, grid.nest), Grid.col(grid, grid.nest)}
+
+    Enum.reduce(row..Grid.near_edge_row(grid), world, fn r, world ->
+      World.put_scent(world, Grid.cell(grid, r, col), 100)
+    end)
   end
+
+  @doc "True if a free body can go on foot from the nest to the pile."
+  def way_to_pile?(world), do: is_map_key(world.walk, world.pile.cell)
 end

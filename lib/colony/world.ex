@@ -7,9 +7,16 @@ defmodule Colony.World do
 
   Each change that a client must know is added to `events`. `tick/2` returns the events of
   the step and removes them from the world.
+
+  The rules of plan 0002:
+
+  - Only a player or a helper locks. A worker never locks.
+  - After a lock, the player takes the body of the nearest free worker.
+  - There is one pile of food at a time. A pile with 0 units makes the next pile.
+  - The first food of a pile makes a record of the bridge that it crossed.
   """
 
-  alias Colony.{Grid, Support, Workers}
+  alias Colony.{Grid, Helpers, Support, Workers}
 
   defstruct cfg: nil,
             p: nil,
@@ -19,32 +26,45 @@ defmodule Colony.World do
             rng: nil,
             tick: 0,
             now: 0,
-            # Free workers: id => %{cell, carry, mode}.
+            # Free workers: id => %{cell, carry, mode, crossed}.
             workers: %{},
-            worker_count: 0,
-            # Locked bodies: cell => %{kind, id, name, time}.
+            # Worker numbers that are free for a new worker.
+            free_ids: [],
+            next_worker: 0,
+            # Locked bodies: cell => %{name, helper, time, crossings}.
             locked: %{},
-            # Support of the locked bodies: cell => support.
+            # Support of the locked bodies: cell => support, as an integer.
             supports: %{},
-            # The last tick when a free body was on a locked body: cell => tick.
-            used: %{},
             # Scent: cell => 1..100.
             scent: %{},
-            food_pile: 0,
+            # The pile of food: %{id, cell, col, width, units, appeared, first_lock, taken}.
+            pile: nil,
+            # The piles before this one: id => %{start, width}.
+            history: %{},
             food_nest: 0,
-            food_empty_tick: nil,
-            # Players: id => player.
+            # Units of food that count for the next new worker.
+            food_credit: 0,
+            # The tick of the last worker that the nest made because the colony had few workers.
+            low_tick: 0,
+            # Players and helpers: id => player.
             players: %{},
             next_player: 1,
-            # The empty gap cells where a lock is possible.
-            frontier: [],
+            demo: false,
             # The number of steps on foot from each cell to the nest.
             walk: %{},
             walk_dirty: true,
+            # The number of steps on foot from each cell near the pile to the pile.
+            to_pile: %{},
+            # The number of steps from each locked body to the far bank, along locked bodies.
+            to_far: %{},
             # The cells that are near scent or near the nest: cell => distance.
             leash: %{},
-            demo: false,
-            demo_front: 0.0,
+            # The records of the bridges, the newest first.
+            records: [],
+            # The records that changed and that the clients do not have.
+            records_dirty: [],
+            # No helper locks before this tick.
+            helper_tick: 0,
             events: nil
 
   @empty_events %{
@@ -52,11 +72,10 @@ defmodule Colony.World do
     worker_set: [],
     worker_gone: [],
     locks: [],
-    let_go: [],
-    fell: [],
     scent: %{},
     names: [],
     you: [],
+    records: [],
     structure: false,
     food: false
   }
@@ -70,8 +89,8 @@ defmodule Colony.World do
   # A point of the way can be this far into a cell where a body cannot be. A body that
   # goes around a corner between two messages does this.
   @way_margin [{0.2, 0.0}, {-0.2, 0.0}, {0.1, 0.173}, {-0.1, 0.173}, {0.1, -0.173}, {-0.1, -0.173}]
-  # A player touches the food from this distance.
-  @food_touch 1.3
+  # The first and the last columns have no pile.
+  @pile_margin 2
 
   @doc """
   Makes a world from the game config.
@@ -79,29 +98,34 @@ defmodule Colony.World do
   `saved` is the term from `to_save/1`, or nil for a new world.
   """
   def new(cfg, saved \\ nil) do
-    grid = Grid.new(cfg)
     rate = Keyword.fetch!(cfg, :tick_rate)
     seed = (saved && saved.seed) || Keyword.get(cfg, :seed) || :rand.uniform(0x7FFFFFFF)
-
-    refill = Keyword.get(cfg, :food_refill_seconds)
-    {nest_row, nest_col} = Keyword.fetch!(cfg, :nest)
+    grid = Grid.new(cfg, seed)
 
     p = %{
       rate: rate,
       step: Keyword.fetch!(cfg, :speed) / rate,
       leash: Keyword.fetch!(cfg, :leash),
       food_radius: Keyword.fetch!(cfg, :food_radius),
-      food_units: Keyword.fetch!(cfg, :food_units),
-      refill_ticks: refill && refill * rate,
-      let_go_ticks: Keyword.fetch!(cfg, :let_go_seconds) * rate,
+      food_touch: Keyword.fetch!(cfg, :food_touch),
+      pile_units: Keyword.fetch!(cfg, :pile_units),
+      pile_rows: Keyword.fetch!(cfg, :pile_rows_from_river),
+      pile_widths: Keyword.fetch!(cfg, :pile_widths),
+      pile_bridge_columns: Keyword.fetch!(cfg, :pile_bridge_columns),
+      pile_loss: Keyword.fetch!(cfg, :pile_loss_seconds),
+      takeover_ticks: Keyword.fetch!(cfg, :takeover_seconds) * rate,
       respawn_ticks: Keyword.fetch!(cfg, :respawn_seconds) * rate,
+      workers_max: Keyword.fetch!(cfg, :workers_max),
+      food_per_worker: Keyword.fetch!(cfg, :food_per_worker),
+      workers_low: Keyword.fetch!(cfg, :workers_low),
+      worker_ticks: Keyword.fetch!(cfg, :worker_seconds) * rate,
+      helpers: Keyword.fetch!(cfg, :helpers),
+      helper_lock_ticks: Keyword.fetch!(cfg, :helper_lock_seconds) * rate,
+      demo_helpers: Keyword.fetch!(cfg, :demo_helpers),
       scent_max: Keyword.fetch!(cfg, :scent_max),
       scent_player: Keyword.fetch!(cfg, :scent_player),
       scent_carry: Keyword.fetch!(cfg, :scent_carry),
-      decay_ticks: Keyword.fetch!(cfg, :scent_decay_seconds) * rate,
-      gap_cells: for(cell <- 0..(grid.count - 1), Grid.kind(grid, cell) == :gap, do: cell),
-      # The demo mode puts scent on these cells: from the nest to the gap in a straight line.
-      demo_path: for(row <- nest_row..Grid.near_edge_row(grid), do: Grid.cell(grid, row, nest_col))
+      decay_ticks: Keyword.fetch!(cfg, :scent_decay_seconds) * rate
     }
 
     world = %__MODULE__{
@@ -111,17 +135,16 @@ defmodule Colony.World do
       rule: Support.rule(cfg),
       seed: seed,
       rng: :rand.seed_s(:exsss, seed),
-      worker_count: Keyword.fetch!(cfg, :workers),
-      food_pile: p.food_units,
       events: @empty_events
     }
 
     world
     |> restore(saved)
-    |> place_workers()
+    |> place_workers((saved && Map.get(saved, :workers)) || Keyword.fetch!(cfg, :workers))
     |> refresh_structure()
     |> refresh_walk()
     |> refresh_leash()
+    |> set_helpers(p.helpers)
   end
 
   # ---------------------------------------------------------------------------
@@ -130,56 +153,54 @@ defmodule Colony.World do
   @doc "The part of the world that goes into the save file."
   def to_save(%__MODULE__{} = world) do
     %{
-      version: 1,
+      version: 2,
       seed: world.seed,
       locked:
         world.locked
-        |> Enum.map(fn {cell, body} -> {cell, body.kind, body.name, body.time} end)
+        |> Enum.map(fn {cell, body} ->
+          {cell, body.name, body.helper, body.time, body.crossings}
+        end)
         |> Enum.sort(),
       scent: world.scent,
-      food_pile: world.food_pile,
-      food_nest: world.food_nest
+      pile: world.pile,
+      history: world.history,
+      food_nest: world.food_nest,
+      food_credit: world.food_credit,
+      workers: map_size(world.workers),
+      records: world.records
     }
   end
 
-  defp restore(world, nil), do: world
+  defp restore(world, %{version: 2} = saved) do
+    grid = world.grid
 
-  defp restore(world, %{version: 1} = saved) do
-    # A saved cell is used only if it is a gap cell of this grid. The config can change
+    # A saved cell is used only if it is a river cell of this grid. The config can change
     # between two runs.
-    {locked, _} =
-      saved.locked
-      |> Enum.filter(fn {cell, _, _, _} ->
-        cell < world.grid.count and Grid.kind(world.grid, cell) == :gap
-      end)
-      |> Enum.reduce({%{}, 0}, fn
-        {cell, :worker, _name, time}, {locked, next} when next < world.worker_count ->
-          {Map.put(locked, cell, %{kind: :worker, id: next, name: "", time: time}), next + 1}
-
-        {_cell, :worker, _name, _time}, acc ->
-          acc
-
-        {cell, :player, name, time}, {locked, next} ->
-          {Map.put(locked, cell, %{kind: :player, id: 0, name: name, time: time}), next}
-      end)
-
-    scent = Map.filter(saved.scent, fn {cell, _} -> cell < world.grid.count end)
+    locked =
+      for {cell, name, helper, time, crossings} <- saved.locked,
+          cell < grid.count and Grid.kind(grid, cell) == :gap,
+          into: %{} do
+        {cell, %{name: name, helper: helper, time: time, crossings: crossings}}
+      end
 
     %{
       world
       | locked: locked,
-        used: Map.new(locked, fn {cell, _} -> {cell, 0} end),
-        scent: scent,
-        food_pile: saved.food_pile,
+        scent: Map.filter(saved.scent, fn {cell, _} -> cell < grid.count end),
+        pile: saved.pile,
+        history: saved.history,
         food_nest: saved.food_nest,
-        food_empty_tick: if(saved.food_pile == 0, do: 0)
+        food_credit: saved.food_credit,
+        records: saved.records
     }
   end
 
-  # The workers that are not locked start near the nest.
-  defp place_workers(world) do
+  # No file, or a file of an older version of the game: a new world.
+  defp restore(world, _saved), do: %{world | pile: first_pile(world)}
+
+  # The workers start near the nest.
+  defp place_workers(world, count) do
     grid = world.grid
-    taken = for {_, %{kind: :worker, id: id}} <- world.locked, into: MapSet.new(), do: id
 
     spots =
       for cell <- 0..(grid.count - 1),
@@ -189,14 +210,10 @@ defmodule Colony.World do
 
     spots = List.to_tuple(spots)
 
-    Enum.reduce(0..(world.worker_count - 1)//1, world, fn id, world ->
-      if MapSet.member?(taken, id) do
-        world
-      else
-        {n, rng} = :rand.uniform_s(tuple_size(spots), world.rng)
-        worker = %{cell: elem(spots, n - 1), carry: false, mode: :out}
-        %{world | rng: rng, workers: Map.put(world.workers, id, worker)}
-      end
+    Enum.reduce(0..(count - 1)//1, %{world | next_worker: count}, fn id, world ->
+      {n, rng} = :rand.uniform_s(tuple_size(spots), world.rng)
+      worker = %{cell: elem(spots, n - 1), carry: nil, mode: :out, crossed: nil}
+      %{world | rng: rng, workers: Map.put(world.workers, id, worker)}
     end)
   end
 
@@ -204,7 +221,9 @@ defmodule Colony.World do
   # Players
 
   @doc "Adds a player. The player gets a body at the nest. Returns `{world, id}`."
-  def join(%__MODULE__{} = world, name) do
+  def join(%__MODULE__{} = world, name), do: add_body(world, name, nil)
+
+  defp add_body(world, name, helper) do
     id = free_player_id(world, world.next_player)
     {x, z} = Grid.center(world.grid, world.grid.nest)
 
@@ -217,7 +236,14 @@ defmodule Colony.World do
       cell: world.grid.nest,
       state: :alive,
       budget: @budget_cap,
-      touched_food: false
+      # The pile that this player got the message of.
+      touched: nil,
+      # The body can lock from this tick.
+      ready_tick: 0,
+      # The worker whose body the player took at the last lock.
+      took: nil,
+      # nil for a person. For a helper: the state of its rules.
+      helper: helper
     }
 
     world = %{
@@ -226,7 +252,7 @@ defmodule Colony.World do
         next_player: rem(id, 0xFFFE) + 1
     }
 
-    {event(world, :names, {id, name}), id}
+    {event(world, :names, {id, name, helper != nil}), id}
   end
 
   defp free_player_id(world, id) do
@@ -248,13 +274,14 @@ defmodule Colony.World do
   """
   def move(%__MODULE__{} = world, id, x, z, heading, scent?) do
     case world.players do
-      %{^id => %{state: :alive} = player} ->
+      %{^id => %{state: :alive, helper: nil} = player} ->
         distance = :math.sqrt((x - player.x) ** 2 + (z - player.z) ** 2)
         cell = Grid.cell_at(world.grid, x, z)
         player = %{player | heading: heading, scent: scent?}
 
         if cell != nil and walkable?(world, cell) and distance <= player.budget + 0.05 and
              clear_way?(world, player.x, player.z, x, z, distance) do
+          world = if cell != player.cell, do: cross(world, cell), else: world
           player = %{player | x: x, z: z, cell: cell, budget: max(0.0, player.budget - distance)}
           %{world | players: Map.put(world.players, id, player)}
         else
@@ -264,29 +291,6 @@ defmodule Colony.World do
 
       _ ->
         world
-    end
-  end
-
-  @doc """
-  A player locks the body into a cell.
-
-  Returns `{:ok, world}` or `{{:error, reason}, world}`.
-  """
-  def lock(%__MODULE__{} = world, id, cell) do
-    with %{state: :alive} = player <- Map.get(world.players, id),
-         true <- is_integer(cell) and cell >= 0 and cell < world.grid.count,
-         true <- cell in Grid.neighbors(world.grid, player.cell),
-         true <- can_lock?(world, cell) do
-      body = %{kind: :player, id: id, name: player.name, time: world.now}
-
-      world =
-        world
-        |> kill_player(id, player, "lock")
-        |> put_lock(cell, body)
-
-      {:ok, world}
-    else
-      _ -> {{:error, :not_possible}, world}
     end
   end
 
@@ -310,16 +314,163 @@ defmodule Colony.World do
     cell != nil and walkable?(world, cell)
   end
 
-  defp kill_player(world, id, player, reason) do
-    player = %{player | state: {:dead, world.tick + world.p.respawn_ticks}, scent: false}
+  @doc """
+  A player or a helper locks the body into a cell.
 
-    %{world | players: Map.put(world.players, id, player)}
-    |> event(:you, {id, %{state: "dead", reason: reason}})
+  Then the player takes the body of the nearest free worker. With no free worker, the
+  player gets a new body at the nest after some seconds.
+
+  Returns `{:ok, world}` or `{{:error, reason}, world}`.
+  """
+  def lock(%__MODULE__{} = world, id, cell) do
+    with %{state: :alive} = player <- Map.get(world.players, id),
+         true <- world.tick >= player.ready_tick,
+         true <- is_integer(cell) and cell >= 0 and cell < world.grid.count,
+         true <- cell in Grid.neighbors(world.grid, player.cell),
+         true <- can_lock?(world, cell) do
+      body = %{
+        name: player.name,
+        helper: player.helper != nil,
+        time: world.now,
+        crossings: 0
+      }
+
+      world =
+        world
+        |> put_lock(cell, body, id)
+        |> take_body(id, player, cell)
+
+      {:ok, world}
+    else
+      _ -> {{:error, :not_possible}, world}
+    end
   end
 
-  @doc "Starts or stops the scent of the demo mode."
+  defp put_lock(world, cell, body, id) do
+    locked = Map.put(world.locked, cell, body)
+    pile = world.pile
+    pile = if pile.first_lock == nil, do: %{pile | first_lock: world.now}, else: pile
+
+    %{
+      world
+      | locked: locked,
+        supports: Support.calculate(world.grid, world.rule, locked),
+        pile: pile,
+        walk_dirty: true
+    }
+    |> event(:locks, {cell, body, id})
+    |> flag(:structure)
+  end
+
+  # The player gets the body of the free worker that is nearest to the locked body by
+  # steps on foot. A worker that carries food is not used.
+  defp take_body(world, id, player, cell) do
+    case nearest_worker(world, cell) do
+      nil ->
+        player = %{
+          player
+          | state: {:dead, world.tick + world.p.respawn_ticks},
+            scent: false,
+            took: nil
+        }
+
+        %{world | players: Map.put(world.players, id, player)}
+
+      {worker_id, at} ->
+        {x, z} = Grid.center(world.grid, at)
+
+        player = %{
+          player
+          | x: x,
+            z: z,
+            cell: at,
+            budget: @budget_cap,
+            ready_tick: world.tick + world.p.takeover_ticks,
+            took: worker_id
+        }
+
+        %{
+          world
+          | players: Map.put(world.players, id, player),
+            workers: Map.delete(world.workers, worker_id),
+            free_ids: [worker_id | world.free_ids]
+        }
+        |> event(:worker_gone, worker_id)
+    end
+  end
+
+  defp nearest_worker(world, cell) do
+    # With more than one worker in a cell, the worker with the lowest number is used.
+    by_cell =
+      Enum.reduce(world.workers, %{}, fn
+        {id, %{carry: nil, cell: at}}, acc -> Map.update(acc, at, id, &min(&1, id))
+        _, acc -> acc
+      end)
+
+    if by_cell == %{}, do: nil, else: search_worker(world, by_cell, [cell], MapSet.new([cell]))
+  end
+
+  defp search_worker(_world, _by_cell, [], _seen), do: nil
+
+  defp search_worker(world, by_cell, front, seen) do
+    case front |> Enum.filter(&is_map_key(by_cell, &1)) |> Enum.min(fn -> nil end) do
+      nil ->
+        {next, seen} =
+          Enum.reduce(front, {[], seen}, fn cell, acc ->
+            Enum.reduce(Grid.neighbors(world.grid, cell), acc, fn to, {next, seen} = acc ->
+              if MapSet.member?(seen, to) or not walkable?(world, to) do
+                acc
+              else
+                {[to | next], MapSet.put(seen, to)}
+              end
+            end)
+          end)
+
+        search_worker(world, by_cell, next, seen)
+
+      at ->
+        {Map.fetch!(by_cell, at), at}
+    end
+  end
+
+  @doc "The data of a locked body for a player who taps it, or nil."
+  def body(%__MODULE__{} = world, cell) do
+    case Map.get(world.locked, cell) do
+      nil -> nil
+      body -> Map.put(body, :support, Map.get(world.supports, cell, 0))
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Helpers and the demo mode
+
+  @doc "Starts or stops the demo mode. The demo mode has helpers and no player."
   def set_demo(%__MODULE__{} = world, demo?) do
-    %{world | demo: demo?, demo_front: if(demo?, do: world.demo_front, else: 0.0)}
+    wanted = if demo?, do: max(world.p.helpers, world.p.demo_helpers), else: world.p.helpers
+    set_helpers(%{world | demo: demo?}, wanted)
+  end
+
+  @doc "Makes the number of helpers `wanted`."
+  def set_helpers(%__MODULE__{} = world, wanted) do
+    now = for {id, %{helper: %{n: n}}} <- world.players, do: {n, id}
+    count = length(now)
+
+    cond do
+      count < wanted ->
+        used = MapSet.new(now, &elem(&1, 0))
+        n = Enum.find(1..(count + 1), &(not MapSet.member?(used, &1)))
+        # `shown`: the pile that the helper showed the way to.
+        helper = %{n: n, next_lock: world.tick, plan: nil, path: [], shown: nil}
+        {world, _id} = add_body(world, "Helper #{n}", helper)
+        set_helpers(world, wanted)
+
+      count > wanted ->
+        {_n, id} = Enum.max(now)
+        set_helpers(leave(world, id), wanted)
+
+      true ->
+        world
+    end
   end
 
   # ---------------------------------------------------------------------------
@@ -332,14 +483,39 @@ defmodule Colony.World do
 
   @doc "True if a body can lock into the cell now."
   def can_lock?(world, cell) do
-    Support.can_lock?(world.grid, world.rule, world.locked, world.supports, cell)
+    Support.can_lock?(world.grid, world.rule, world.locked, cell)
   end
 
   @doc "The scent of a cell."
   def scent(world, cell), do: Map.get(world.scent, cell, 0)
 
+  @doc "The groups of locked bodies that touch each other, as a list of sets of cells."
+  def bridges(world) do
+    {groups, _seen} =
+      Enum.reduce(world.locked, {[], MapSet.new()}, fn {cell, _}, {groups, seen} = acc ->
+        if MapSet.member?(seen, cell) do
+          acc
+        else
+          group = Support.group(world.grid, world.locked, cell)
+          {[group | groups], MapSet.union(seen, group)}
+        end
+      end)
+
+    groups
+  end
+
+  @doc "True if a group of locked bodies touches the two banks."
+  def complete?(world, group) do
+    kinds =
+      for cell <- group, next <- Grid.neighbors(world.grid, cell), into: MapSet.new() do
+        Grid.kind(world.grid, next)
+      end
+
+    MapSet.member?(kinds, :near) and MapSet.member?(kinds, :far)
+  end
+
   # ---------------------------------------------------------------------------
-  # Changes that the worker rules also use
+  # Changes that the worker rules and the helper rules also use
 
   @doc false
   def event(world, key, item) do
@@ -371,41 +547,257 @@ defmodule Colony.World do
   end
 
   @doc false
+  # A free body goes on a cell. If a locked body is there, its count goes up.
+  def cross(world, cell) do
+    case world.locked do
+      %{^cell => body} ->
+        %{world | locked: Map.put(world.locked, cell, %{body | crossings: body.crossings + 1})}
+
+      _ ->
+        world
+    end
+  end
+
+  @doc false
+  # A worker takes one unit from the pile. The first unit stops the loss of the pile.
   def take_food(world) do
-    pile = world.food_pile - 1
-
-    %{world | food_pile: pile, food_empty_tick: if(pile == 0, do: world.tick)}
-    |> flag(:food)
+    pile = %{world.pile | units: world.pile.units - 1, taken: true}
+    world = flag(%{world | pile: pile}, :food)
+    if pile.units == 0, do: next_pile(world), else: world
   end
 
   @doc false
-  def add_nest_food(world) do
-    flag(%{world | food_nest: world.food_nest + 1}, :food)
+  # A worker brings one unit of food from the pile `pile_id` to the nest.
+  # `crossed` is a locked body that the worker went on.
+  def add_nest_food(world, pile_id, crossed) do
+    world = flag(%{world | food_nest: world.food_nest + 1}, :food)
+    credit = world.food_credit + 1
+
+    world =
+      if credit >= world.p.food_per_worker and map_size(world.workers) < world.p.workers_max do
+        make_worker(%{world | food_credit: credit - world.p.food_per_worker})
+      else
+        %{world | food_credit: min(credit, world.p.food_per_worker)}
+      end
+
+    record_food(world, pile_id, crossed)
   end
 
   @doc false
-  def touch(world, cell) do
-    if is_map_key(world.locked, cell) do
-      %{world | used: Map.put(world.used, cell, world.tick)}
+  def put_player(world, id, player), do: %{world | players: Map.put(world.players, id, player)}
+
+  # ---------------------------------------------------------------------------
+  # Workers of the nest
+
+  # The nest makes a new worker, if the colony has room.
+  defp make_worker(world) do
+    if map_size(world.workers) >= world.p.workers_max do
+      world
+    else
+      {id, world} =
+        case world.free_ids do
+          [id | rest] -> {id, %{world | free_ids: rest}}
+          [] -> {world.next_worker, %{world | next_worker: world.next_worker + 1}}
+        end
+
+      worker = %{cell: world.grid.nest, carry: nil, mode: :out, crossed: nil}
+
+      %{world | workers: Map.put(world.workers, id, worker)}
+      # Flag 2: the worker starts at a new position.
+      |> event(:worker_set, {id, world.grid.nest, 2})
+    end
+  end
+
+  # With few free workers, the nest makes one worker each some seconds.
+  defp low_workers(world) do
+    cond do
+      map_size(world.workers) >= world.p.workers_low ->
+        %{world | low_tick: world.tick}
+
+      world.tick - world.low_tick >= world.p.worker_ticks ->
+        make_worker(%{world | low_tick: world.tick})
+
+      true ->
+        world
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # The pile
+
+  # The first pile is across the narrowest place of the river.
+  defp first_pile(world) do
+    grid = world.grid
+    {_row, nest_col} = Keyword.fetch!(world.cfg, :nest)
+
+    col =
+      Enum.min_by(@pile_margin..(grid.width - 1 - @pile_margin), fn col ->
+        {Grid.river_width(grid, col), abs(col - nest_col)}
+      end)
+
+    make_pile(world, 1, col)
+  end
+
+  defp make_pile(world, id, col) do
+    grid = world.grid
+    width = Grid.river_width(grid, col)
+
+    %{
+      id: id,
+      cell: Grid.cell(grid, grid.near_rows + width + world.p.pile_rows - 1, col),
+      col: col,
+      width: width,
+      units: world.p.pile_units,
+      appeared: world.now,
+      # The time of the first lock after the pile appeared.
+      first_lock: nil,
+      # True after a worker took food from the pile.
+      taken: false
+    }
+  end
+
+  # From the first lock to the first food, the pile loses units.
+  defp pile_loss(%{pile: %{first_lock: lock, taken: false, units: units} = pile} = world)
+       when lock != nil and units > 0 do
+    if rem(div(world.tick, world.p.rate), world.p.pile_loss) == 0 do
+      world = flag(%{world | pile: %{pile | units: units - 1}}, :food)
+      if units == 1, do: next_pile(world), else: world
     else
       world
     end
   end
 
-  @doc false
-  # Puts a body into a gap cell. The caller makes sure that the lock is possible.
-  def put_lock(world, cell, body) do
-    locked = Map.put(world.locked, cell, body)
+  defp pile_loss(world), do: world
 
-    %{
-      world
-      | locked: locked,
-        supports: Support.calculate(world.grid, world.rule, locked),
-        used: Map.put(world.used, cell, world.tick),
-        walk_dirty: true
+  # The pile has 0 units. The next pile appears across a wider place.
+  defp next_pile(world) do
+    old = world.pile
+
+    history =
+      Map.put(world.history, old.id, %{start: old.first_lock || old.appeared, width: old.width})
+
+    {col, world} = pile_column(world, old.id + 1)
+
+    %{world | history: history, pile: make_pile(world, old.id + 1, col), walk_dirty: true}
+    |> finish_records()
+    |> flag(:food)
+  end
+
+  defp pile_column(world, id) do
+    grid = world.grid
+    columns = Enum.reject(@pile_margin..(grid.width - 1 - @pile_margin), &(&1 == world.pile.col))
+
+    # A new pile is some columns or more from each complete bridge, if that is possible.
+    bridge_columns =
+      for group <- bridges(world), complete?(world, group), cell <- group, uniq: true do
+        Grid.col(grid, cell)
+      end
+
+    far =
+      Enum.filter(columns, fn col ->
+        Enum.all?(bridge_columns, &(abs(&1 - col) >= world.p.pile_bridge_columns))
+      end)
+
+    columns = if far == [], do: columns, else: far
+
+    # The pile number 2 is at the first width of the list. After the list, the place is random.
+    columns =
+      case Enum.at(world.p.pile_widths, id - 2) do
+        nil ->
+          columns
+
+        target ->
+          best = columns |> Enum.map(&abs(Grid.river_width(grid, &1) - target)) |> Enum.min()
+          Enum.filter(columns, &(abs(Grid.river_width(grid, &1) - target) == best))
+      end
+
+    {n, rng} = :rand.uniform_s(length(columns), world.rng)
+    {Enum.at(columns, n - 1), %{world | rng: rng}}
+  end
+
+  # ---------------------------------------------------------------------------
+  # Records
+
+  # One unit of food from a pile is at the nest. The first unit of a pile makes the
+  # record of the bridge that the worker crossed.
+  defp record_food(world, pile_id, crossed) do
+    case Enum.find(world.records, &(&1.id == pile_id)) do
+      nil -> make_record(world, pile_id, crossed)
+      record -> put_record(world, %{record | food: record.food + 1})
+    end
+    |> finish_records()
+  end
+
+  defp make_record(world, pile_id, crossed) do
+    grid = world.grid
+
+    {start, width} =
+      case world.history do
+        %{^pile_id => %{start: start, width: width}} -> {start, width}
+        _ -> {world.pile.first_lock || world.pile.appeared, world.pile.width}
+      end
+
+    group =
+      if crossed != nil and is_map_key(world.locked, crossed),
+        do: Support.group(grid, world.locked, crossed),
+        else: MapSet.new()
+
+    names =
+      group
+      |> Enum.map(&Map.fetch!(world.locked, &1))
+      |> Enum.group_by(&{&1.name, &1.helper})
+      |> Enum.map(fn {{name, helper}, bodies} ->
+        %{name: name, helper: helper, bodies: length(bodies)}
+      end)
+      |> Enum.sort_by(&{-&1.bodies, &1.name})
+
+    rows = group |> Enum.map(&Grid.row(grid, &1)) |> Enum.uniq() |> length()
+
+    record = %{
+      id: pile_id,
+      time: world.now,
+      # The seconds from the first lock to the first food.
+      seconds: max(0, world.now - start),
+      names: names,
+      bodies: MapSet.size(group),
+      rows: rows,
+      width: width,
+      food: 1,
+      # True when the pile has 0 units and all its food is at the nest.
+      done: false
     }
-    |> event(:locks, {cell, body})
-    |> flag(:structure)
+
+    %{world | records: [record | world.records], records_dirty: [pile_id | world.records_dirty]}
+    # The players with a body in the bridge see this record immediately.
+    |> event(:records, Map.put(record, :first, true))
+  end
+
+  defp put_record(world, record) do
+    records = Enum.map(world.records, &if(&1.id == record.id, do: record, else: &1))
+    %{world | records: records, records_dirty: Enum.uniq([record.id | world.records_dirty])}
+  end
+
+  # A record is complete when its pile has 0 units and no worker carries food from it.
+  defp finish_records(world) do
+    carried =
+      for {_id, %{carry: pile_id}} <- world.workers, pile_id != nil, into: MapSet.new(), do: pile_id
+
+    Enum.reduce(world.records, world, fn record, world ->
+      if not record.done and record.id < world.pile.id and not MapSet.member?(carried, record.id) do
+        put_record(world, %{record | done: true})
+      else
+        world
+      end
+    end)
+  end
+
+  # The clients get the records that changed, one time each second at most.
+  defp send_records(%{records_dirty: []} = world), do: world
+
+  defp send_records(world) do
+    world.records
+    |> Enum.filter(&(&1.id in world.records_dirty))
+    |> Enum.reduce(%{world | records_dirty: []}, &event(&2, :records, &1))
   end
 
   # ---------------------------------------------------------------------------
@@ -414,8 +806,8 @@ defmodule Colony.World do
   @doc """
   Moves the world one tick.
 
-  `now` is the time in seconds. It goes into the locked bodies. With nil, the time is the
-  number of seconds of world time.
+  `now` is the time in seconds. It goes into the locked bodies and the records. With nil,
+  the time is the number of seconds of world time.
 
   Returns `{world, events}`.
   """
@@ -425,8 +817,9 @@ defmodule Colony.World do
 
     world
     |> each_second()
-    |> demo_scent()
     |> step_players()
+    |> refresh_walk()
+    |> Helpers.step()
     |> refresh_walk()
     |> Workers.step()
     |> take_events()
@@ -434,7 +827,6 @@ defmodule Colony.World do
 
   @doc "Returns `{world, events}` and removes the events from the world."
   def take_events(%__MODULE__{} = world) do
-    world = if world.events.structure, do: refresh_frontier(world), else: world
     {%{world | events: @empty_events}, world.events}
   end
 
@@ -442,8 +834,10 @@ defmodule Colony.World do
     if rem(world.tick, world.p.rate) == 0 do
       world
       |> decay_scent()
-      |> refill_food()
-      |> let_go()
+      |> pile_loss()
+      |> low_workers()
+      |> finish_records()
+      |> send_records()
       |> refresh_leash()
     else
       world
@@ -460,28 +854,6 @@ defmodule Colony.World do
     end
   end
 
-  defp refill_food(%{food_pile: 0, food_empty_tick: empty, p: %{refill_ticks: ticks}} = world)
-       when is_integer(empty) and is_integer(ticks) do
-    if world.tick - empty >= ticks do
-      flag(%{world | food_pile: world.p.food_units, food_empty_tick: nil}, :food)
-    else
-      world
-    end
-  end
-
-  defp refill_food(world), do: world
-
-  defp demo_scent(%{demo: true} = world) do
-    path = world.p.demo_path
-    front = min(length(path) * 1.0, world.demo_front + world.p.step)
-
-    path
-    |> Enum.take(trunc(front) + 1)
-    |> Enum.reduce(%{world | demo_front: front}, &put_scent(&2, &1, world.p.scent_player))
-  end
-
-  defp demo_scent(world), do: world
-
   defp step_players(world) do
     Enum.reduce(world.players, world, fn
       {id, %{state: {:dead, at}} = player}, world when world.tick >= at ->
@@ -494,172 +866,52 @@ defmodule Colony.World do
             z: z,
             cell: world.grid.nest,
             budget: @budget_cap,
-            scent: false
+            scent: false,
+            took: nil
         }
 
-        %{world | players: Map.put(world.players, id, player)}
+        world
+        |> put_player(id, player)
         |> event(:you, {id, %{state: "alive", x: x, z: z}})
 
       {id, %{state: :alive} = player}, world ->
         # The 1.15 lets a client clock be a small quantity faster than the server clock.
-        budget = min(@budget_cap, player.budget + world.p.step * 1.15)
-        world = %{world | players: Map.put(world.players, id, %{player | budget: budget})}
-        world = touch(world, player.cell)
+        player = %{player | budget: min(@budget_cap, player.budget + world.p.step * 1.15)}
+        world = put_player(world, id, player)
 
         world =
           if player.scent, do: put_scent(world, player.cell, world.p.scent_player), else: world
 
-        touch_food(world, id, %{player | budget: budget})
+        touch_pile(world, id, player)
 
       _, world ->
         world
     end)
   end
 
-  defp touch_food(world, _id, %{touched_food: true}), do: world
+  # A player who gets to the pile gets a message, one time for each pile.
+  defp touch_pile(world, id, player) do
+    pile = world.pile
+    {px, pz} = Grid.center(world.grid, pile.cell)
 
-  defp touch_food(world, id, player) do
-    {fx, fz} = Grid.center(world.grid, world.grid.food)
-
-    if (player.x - fx) ** 2 + (player.z - fz) ** 2 <= @food_touch ** 2 do
-      %{world | players: Map.put(world.players, id, %{player | touched_food: true})}
-      |> event(:you, {id, %{food: true}})
+    if player.helper == nil and player.touched != pile.id and
+         (player.x - px) ** 2 + (player.z - pz) ** 2 <= world.p.food_touch ** 2 do
+      world
+      |> put_player(id, %{player | touched: pile.id})
+      |> event(:you, {id, %{food: true, pile: pile.id}})
     else
       world
     end
   end
 
   # ---------------------------------------------------------------------------
-  # Let go and fall
-
-  # A locked worker lets go when no free body was on it, or on a body that it touches,
-  # for the let-go time.
-  defp let_go(world) do
-    world = touch_all(world)
-    limit = world.tick - world.p.let_go_ticks
-
-    idle =
-      for {cell, %{kind: :worker} = body} <- world.locked, last_use(world, cell) <= limit do
-        {cell, body}
-      end
-
-    if idle == [], do: world, else: remove(world, idle)
-  end
-
-  defp touch_all(world) do
-    world =
-      Enum.reduce(world.workers, world, fn {_id, worker}, world -> touch(world, worker.cell) end)
-
-    Enum.reduce(world.players, world, fn
-      {_id, %{state: :alive, cell: cell}}, world -> touch(world, cell)
-      _, world -> world
-    end)
-  end
-
-  defp last_use(world, cell) do
-    Enum.reduce(Grid.neighbors(world.grid, cell), Map.get(world.used, cell, 0), fn next, last ->
-      max(last, Map.get(world.used, next, 0))
-    end)
-  end
-
-  @doc false
-  # Takes bodies out of the bridge. `released` is a list of `{cell, body}`.
-  # Then the bodies that have no support fall, and the free bodies that were on them fall.
-  def remove(world, released) do
-    released_cells = Enum.map(released, &elem(&1, 0))
-    # The clients do not get this event: they get the structure. The contract tests use it.
-    world = Enum.reduce(released_cells, world, &event(&2, :let_go, &1))
-    locked = Map.drop(world.locked, released_cells)
-    {supports, fallen} = Support.settle(world.grid, world.rule, locked)
-    fallen_bodies = Map.take(locked, fallen)
-    gone = released_cells ++ fallen
-
-    world = %{
-      world
-      | locked: Map.drop(locked, fallen),
-        supports: supports,
-        used: Map.drop(world.used, gone),
-        walk_dirty: true
-    }
-
-    # A worker that falls starts again at the nest.
-    world =
-      Enum.reduce(fallen_bodies, world, fn {cell, body}, world ->
-        world = event(world, :fell, cell)
-        if body.kind == :worker, do: free_worker(world, body.id, world.grid.nest, 2), else: world
-      end)
-
-    # A worker that lets go steps to a cell that touches it. If there is no such cell, it falls.
-    world =
-      Enum.reduce(released, world, fn {cell, body}, world ->
-        case step_off(world, cell) do
-          nil -> world |> event(:fell, cell) |> free_worker(body.id, world.grid.nest, 2)
-          to -> free_worker(world, body.id, to, 0)
-        end
-      end)
-
-    world
-    |> drop_free_bodies(MapSet.new(gone))
-    |> flag(:structure)
-  end
-
-  defp step_off(world, cell) do
-    {bank, bodies} =
-      world.grid
-      |> Grid.neighbors(cell)
-      |> Enum.filter(&walkable?(world, &1))
-      |> Enum.split_with(&(Grid.kind(world.grid, &1) != :gap))
-
-    case {bank, bodies} do
-      {[to | _], _} -> to
-      {[], []} -> nil
-      {[], bodies} -> Enum.max_by(bodies, &Map.get(world.supports, &1, 0.0))
-    end
-  end
-
-  # Flags of a worker for the clients: 1 = carries food, 2 = starts at a new position.
-  defp free_worker(world, id, cell, flags) do
-    worker = %{cell: cell, carry: false, mode: :out}
-
-    %{world | workers: Map.put(world.workers, id, worker)}
-    |> event(:worker_set, {id, cell, flags})
-  end
-
-  defp drop_free_bodies(world, gone) do
-    world =
-      Enum.reduce(world.workers, world, fn {id, worker}, world ->
-        if MapSet.member?(gone, worker.cell) and not is_map_key(world.locked, worker.cell) do
-          free_worker(world, id, world.grid.nest, 2)
-        else
-          world
-        end
-      end)
-
-    Enum.reduce(world.players, world, fn
-      {id, %{state: :alive, cell: cell} = player}, world ->
-        if MapSet.member?(gone, cell) and not is_map_key(world.locked, cell) do
-          kill_player(world, id, player, "fell")
-        else
-          world
-        end
-
-      _, world ->
-        world
-    end)
-  end
-
-  # ---------------------------------------------------------------------------
   # Values that are calculated from the state
 
+  # After a load: the bodies with no support fall. In a game that runs, no step removes
+  # a body, thus no body loses its support.
   defp refresh_structure(world) do
     {supports, fallen} = Support.settle(world.grid, world.rule, world.locked)
-
     %{world | locked: Map.drop(world.locked, fallen), supports: supports, walk_dirty: true}
-    |> refresh_frontier()
-  end
-
-  defp refresh_frontier(world) do
-    %{world | frontier: Enum.filter(world.p.gap_cells, &can_lock?(world, &1))}
   end
 
   # The number of steps on foot to the nest, for each cell that has a way to the nest.
@@ -668,7 +920,18 @@ defmodule Colony.World do
   defp refresh_walk(world) do
     nest = world.grid.nest
     walk = flood(world.grid, [nest], %{nest => 0}, 1, :infinity, &walkable?(world, &1))
-    %{world | walk: walk, walk_dirty: false}
+    pile = world.pile.cell
+    reach = 2 * world.p.food_radius
+    to_pile = flood(world.grid, [pile], %{pile => 0}, 1, reach, &walkable?(world, &1))
+
+    last =
+      for {cell, _} <- world.locked,
+          Enum.any?(Grid.neighbors(world.grid, cell), &(Grid.kind(world.grid, &1) == :far)),
+          do: cell
+
+    locked? = &is_map_key(world.locked, &1)
+    to_far = flood(world.grid, last, Map.new(last, &{&1, 1}), 2, :infinity, locked?)
+    %{world | walk: walk, to_pile: to_pile, to_far: to_far, walk_dirty: false}
   end
 
   # The cells that are not more than `leash` cells from scent or from the nest.
@@ -678,12 +941,14 @@ defmodule Colony.World do
     %{world | leash: flood(world.grid, sources, start, 1, world.p.leash, fn _ -> true end)}
   end
 
-  defp flood(_grid, [], distances, _distance, _limit, _open?), do: distances
+  @doc false
+  # The number of steps from the cells of `front` to each cell that `open?` permits.
+  def flood(_grid, [], distances, _distance, _limit, _open?), do: distances
 
-  defp flood(_grid, _front, distances, distance, limit, _open?) when distance > limit,
+  def flood(_grid, _front, distances, distance, limit, _open?) when distance > limit,
     do: distances
 
-  defp flood(grid, front, distances, distance, limit, open?) do
+  def flood(grid, front, distances, distance, limit, open?) do
     {next, distances} =
       Enum.reduce(front, {[], distances}, fn cell, acc ->
         Enum.reduce(Grid.neighbors(grid, cell), acc, fn to, {next, distances} = acc ->

@@ -1,5 +1,5 @@
 defmodule Colony.WorkersTest do
-  @moduledoc "Tests 3 and 4 of the plan: the workers build a bridge, bring food and let go."
+  @moduledoc "Plan 0002, section 4.1: a worker never locks. It follows scent and carries food."
 
   use ExUnit.Case, async: true
 
@@ -8,103 +8,101 @@ defmodule Colony.WorkersTest do
   # 5 minutes of world time.
   @five_minutes 3000
 
-  defp complete?(world), do: is_map_key(world.walk, world.grid.food)
+  test "with no player and no helper, and scent from the nest to the river, no body locks in 5 minutes" do
+    for seed <- 1..3 do
+      world = World.new(Sim.cfg(workers: 200, seed: seed))
 
-  test "200 workers with scent complete a bridge and bring food in less than 5 minutes" do
-    world = World.new(Sim.cfg(workers: 200)) |> World.set_demo(true)
+      world =
+        Enum.reduce(1..@five_minutes, world, fn _, world ->
+          # The line of scent stays strong for all the test.
+          world = Sim.scent_line(world)
+          {world, events} = World.tick(world)
+          assert events.locks == []
+          world
+        end)
 
-    {world, bridge_ticks} = Sim.run_until(world, @five_minutes, &complete?/1)
-    assert bridge_ticks != nil, "no complete bridge in 5 minutes"
+      assert world.locked == %{}
+      assert world.pile.units == 300
+      assert world.pile.first_lock == nil
+      assert map_size(world.workers) == 200
 
-    {world, food_ticks} = Sim.run_until(world, @five_minutes - bridge_ticks, &(&1.food_nest > 0))
-    assert food_ticks != nil, "no food at the nest in 5 minutes"
-
-    IO.puts(
-      "\n  200 workers: bridge complete after #{bridge_ticks / 10} s with " <>
-        "#{length(Sim.locked_workers(world))} bodies, first food at the nest after " <>
-        "#{(bridge_ticks + food_ticks) / 10} s of world time"
-    )
-
-    # The bridge goes from bank to bank and each body has support.
-    rows = world.locked |> Map.keys() |> Enum.map(&Grid.row(world.grid, &1)) |> Enum.uniq()
-    assert Enum.sort(rows) == Enum.to_list(14..25)
-    assert Enum.all?(world.supports, fn {_cell, support} -> support > 0 end)
-
-    # The number of workers stays the same.
-    world = Sim.run(world, 600)
-    assert map_size(world.workers) + length(Sim.locked_workers(world)) == 200
-
-    assert world.food_nest + world.food_pile + Enum.count(world.workers, fn {_, w} -> w.carry end) ==
-             500
+      # The workers followed the scent: many are at the river.
+      at_river = Enum.count(world.workers, fn {_id, w} -> Grid.row(world.grid, w.cell) >= 11 end)
+      assert at_river > 50
+    end
   end
 
-  test "workers with no scent stay near the nest and do not lock" do
-    world = World.new(Sim.cfg(workers: 200)) |> Sim.run(600)
-    assert world.locked == %{}
+  test "workers with no scent stay near the nest" do
+    world = World.new(Sim.cfg(workers: 100)) |> Sim.run(600)
 
     for {_id, worker} <- world.workers do
       assert Grid.nest_distance(world.grid, worker.cell) <= 6
     end
   end
 
-  test "when the scent goes away, all locked workers let go and the bodies of players stay if they have support" do
-    cfg = Sim.cfg(workers: 200, food_units: 30, food_refill_seconds: nil)
-    {world, id} = World.join(World.new(cfg), "Ada")
+  test "workers wait at the end of a bridge that has scent: they are the next bodies" do
+    {world, id} = World.join(World.new(Sim.straight(8, workers: 30)), "Ada")
+    col = Grid.col(world.grid, world.grid.nest)
 
-    # Three bodies of a player, far from the bridge of the workers. They have support
-    # from the bank.
-    own = for n <- 1..3, do: Sim.gap_cell(world, n, 10)
-    world = Enum.reduce(own, world, &Sim.lock!(&2, id, &1))
+    # The player goes from the nest to the river with scent and locks 3 bodies.
+    world =
+      Enum.reduce(1..3, world, fn n, world ->
+        stand =
+          if n == 1, do: Grid.cell(world.grid, 13, col), else: Sim.river_cell(world, n - 1, col)
 
-    # The workers build a bridge and carry all the food.
-    world = World.set_demo(world, true)
-    {world, ticks} = Sim.run_until(world, @five_minutes, &(&1.food_nest == 30))
-    assert ticks != nil
-    assert Sim.locked_workers(world) != []
-
-    # One body of the player on the bridge of the workers, in the middle of the gap.
-    # Only the workers give it support.
-    middle =
-      Enum.find(world.frontier, fn cell ->
-        Grid.row(world.grid, cell) in 18..21 and
-          Enum.any?(Grid.neighbors(world.grid, cell), &(world.locked[&1][:kind] == :worker))
+        world = Sim.walk(world, id, stand, true)
+        {:ok, world} = World.lock(world, id, Sim.river_cell(world, n, col))
+        world
       end)
 
-    world = Sim.lock!(world, id, middle)
-    assert world.locked[middle].kind == :player
-
-    # The scent goes away.
-    world = World.set_demo(world, false)
-    {world, ticks} = Sim.run_until(world, @five_minutes, &(&1.scent == %{}))
-    assert ticks != nil, "the scent did not go away"
-
-    # 20 seconds is the time to let go. Some bodies are used a short time after the scent
-    # is gone, thus the test waits longer.
-    world = Sim.run(world, 600)
-
-    assert Sim.locked_workers(world) == []
-    assert map_size(world.workers) == 200
-    assert Enum.sort(Map.keys(world.locked)) == Enum.sort(own)
-    assert Enum.map(own, &world.supports[&1]) == [7.0, 6.0, 5.0]
-    refute is_map_key(world.locked, middle)
-  end
-
-  test "workers help with a bridge of a player that has scent on it" do
-    {world, id} = World.join(World.new(Sim.cfg(workers: 200, seed: 5)), "Ada")
-    col = 30
-
-    # The player locks one body, then makes a line of scent from the nest to the gap.
-    world = Sim.lock!(world, id, Sim.gap_cell(world, 1, col))
+    # The player waits at the end of the bridge with scent.
+    tip = Sim.river_cell(world, 3, col)
+    world = Sim.walk(world, id, tip, true)
 
     world =
-      Enum.reduce(7..13, world, fn row, world ->
-        cell = Grid.cell(world.grid, row, col)
-        world = Sim.walk(world, id, cell)
-        World.put_scent(world, cell, 100)
+      Enum.reduce(1..150, world, fn _, world ->
+        player = world.players[id]
+        world |> World.move(id, player.x, player.z, 0.0, true) |> Sim.run(1)
       end)
 
-    {world, ticks} = Sim.run_until(world, 1000, &complete?/1)
-    assert ticks != nil
-    assert world.locked[Sim.gap_cell(world, 1, col)].name == "Ada"
+    on_bridge = Enum.count(world.workers, fn {_id, w} -> Grid.kind(world.grid, w.cell) == :gap end)
+    assert on_bridge >= 5
+
+    # After the next lock, the new body of the player is on the bridge, not at the nest.
+    assert {:ok, world} = World.lock(world, id, Sim.river_cell(world, 4, col))
+    assert Grid.kind(world.grid, world.players[id].cell) == :gap
+  end
+
+  test "workers go around a corner of a bridge to the pile" do
+    # A bridge that goes to the side at its end. A worker that goes only nearer to the
+    # pile in a straight line stops at the corner.
+    {world, id} = World.join(World.new(Sim.straight(6, workers: 20, pile_units: 30)), "Ada")
+    col = world.pile.col - 3
+
+    cells =
+      for(n <- 1..4, do: Sim.river_cell(world, n, col)) ++
+        for(c <- (col + 1)..(col + 3), do: Sim.river_cell(world, 4, c)) ++
+        for n <- 5..6, do: Sim.river_cell(world, n, col + 3)
+
+    world = Enum.reduce(cells, world, &Sim.lock!(&2, id, &1))
+    assert Sim.way_to_pile?(Sim.run(world, 1))
+
+    # Scent from the nest, along the bank, across the bridge and to the pile.
+    nest_col = Grid.col(world.grid, world.grid.nest)
+    step = if col >= nest_col, do: 1, else: -1
+    bank = for c <- nest_col..col//step, do: Grid.cell(world.grid, 6, c)
+
+    world =
+      Enum.reduce(
+        bank ++ [Grid.cell(world.grid, 13, col)] ++ cells,
+        world,
+        &Sim.walk(&2, id, &1, true)
+      )
+
+    world = Sim.walk(world, id, hd(Grid.neighbors(world.grid, world.pile.cell)), true)
+
+    {world, ticks} = Sim.run_until(world, @five_minutes, &(&1.food_nest >= 10))
+    assert ticks != nil, "the workers did not bring 10 units in 5 minutes"
+    assert [%{names: [%{name: "Ada", bodies: 9}]}] = world.records
   end
 end

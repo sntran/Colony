@@ -4,16 +4,52 @@ defmodule Colony.GridTest do
   alias Colony.{Grid, Sim}
 
   setup_all do
-    %{grid: Grid.new(Sim.cfg())}
+    %{grid: Grid.new(Sim.cfg(), 1)}
   end
 
-  test "the grid has the size of the plan", %{grid: grid} do
+  test "the grid has a near bank of 14 rows and 60 columns", %{grid: grid} do
     assert grid.width == 60
-    assert {grid.near_rows, grid.gap_rows, grid.far_rows} == {14, 12, 14}
+    assert grid.near_rows == 14
     assert Grid.kind(grid, grid.nest) == :near
-    assert Grid.kind(grid, grid.food) == :far
-    # The food is 4 rows from the gap.
-    assert Grid.row(grid, grid.food) == grid.near_rows + grid.gap_rows + 3
+    assert Enum.all?(0..59, &(Grid.kind(grid, Grid.cell(grid, 13, &1)) == :near))
+    assert Enum.all?(0..59, &(Grid.kind(grid, Grid.cell(grid, 14, &1)) == :gap))
+  end
+
+  test "the river is 5 to 16 rows wide, and its narrowest place is near the nest" do
+    for seed <- 1..40 do
+      cfg = Sim.cfg()
+      river = Grid.river(cfg, seed)
+      {_row, nest_col} = cfg[:nest]
+      {narrow, widest} = Enum.min_max(river)
+
+      assert length(river) == 60
+      assert narrow in [5, 6], "seed #{seed}: the narrowest place is #{narrow} rows"
+      assert widest == 16
+      place = Enum.find_index(river, &(&1 == narrow))
+      assert abs(place - nest_col) <= 6, "seed #{seed}: the narrowest place is at column #{place}"
+
+      # Each width of the sequence of the piles is somewhere.
+      for width <- cfg[:pile_widths], do: assert(width in river)
+
+      # The edge of the far bank has no large step.
+      for [a, b] <- Enum.chunk_every(river, 2, 1, :discard), do: assert(abs(a - b) <= 2)
+    end
+  end
+
+  test "two seeds give two rivers, and one seed gives the same river each time" do
+    cfg = Sim.cfg()
+    rivers = for seed <- 1..10, do: Grid.river(cfg, seed)
+    assert length(Enum.uniq(rivers)) >= 8
+    assert Grid.river(cfg, 7) == Grid.river(cfg, 7)
+  end
+
+  test "the far bank starts after the river in each column", %{grid: grid} do
+    for col <- 0..59 do
+      width = Grid.river_width(grid, col)
+      assert Grid.kind(grid, Grid.cell(grid, 14 + width - 1, col)) == :gap
+      assert Grid.kind(grid, Grid.cell(grid, 14 + width, col)) == :far
+      assert Grid.river_row(grid, Grid.cell(grid, 14 + width - 1, col)) == width
+    end
   end
 
   test "a cell touches two cells in its row, two before and two after", %{grid: grid} do
@@ -23,6 +59,8 @@ defmodule Colony.GridTest do
       assert rows == [-1, -1, 0, 0, 1, 1]
       assert length(Grid.forward(grid, cell)) == 2
       assert length(Grid.beside(grid, cell)) == 2
+      # The first cell of `forward` is in the same column.
+      assert Grid.col(grid, hd(Grid.forward(grid, cell))) == col
 
       for next <- Grid.neighbors(grid, cell) do
         {x1, z1} = Grid.center(grid, cell)

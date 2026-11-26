@@ -9,26 +9,28 @@ defmodule Colony.Protocol do
 
   The records of each section:
 
-      1  hello       width u16, near rows u8, gap rows u8, far rows u8, nest cell u16,
-                     food cell u16, seed u32, your id u16, tick rate u8, speed * 10 u8,
-                     scent decay ticks u16, food units u16
-      2  names       player id u16, length u8, name
+      1  hello       width u16, near rows u8, rows u8, nest cell u16, seed u32, your id u16,
+                     tick rate u8, speed * 10 u8, scent decay ticks u16, pile units u16,
+                     bank support u8, the number of costs u8, then each cost u8,
+                     then the width of the river in each column, u8
+      2  names       player id u16, flags u8 (1 = helper), length u8, name
       3  worker set  worker id u16, cell u16, flags u8 (1 = carries food, 2 = new position)
       4  moves       u16: worker id * 8 + direction
       5  worker gone worker id u16
-      6  locks       cell u16, kind u8 (0 = worker, 1 = player), body id u16, time u32,
+      6  locks       cell u16, kind u8 (1 = player, 2 = helper), player id u16, time u32,
                      length u8, name
-      7  fell        cell u16
-      8  structure   cell u16, support * 2 u8. All the locked bodies.
-      9  frontier    cell u16. All the cells where a lock is possible.
+      8  structure   cell u16, support u8. All the locked bodies.
       10 scent       cell u16, value u8
-      11 food        pile u16, nest u32
+      11 food        pile id u16, pile cell u16, pile units u16, food at the nest u32
       12 players     player id u16, x u16, z u16, heading u8, flags u8 (1 = puts scent)
 
   A position is `(value + 1) * 1000`. A heading is a part of a full turn times 256.
+  The supports and the costs are integers: see `Colony.Support`.
 
   The snapshot (event "s") has all the state. A tick (event "t") has only the changes.
   A move from a client (event "m") is: x u16, z u16, heading u8, flags u8.
+
+  The records of the bridges are not binary: the event "record" has one record as JSON.
   """
 
   import Bitwise
@@ -41,9 +43,7 @@ defmodule Colony.Protocol do
   @moves 4
   @worker_gone 5
   @locks 6
-  @fell 7
   @structure 8
-  @frontier 9
   @scent 10
   @food 11
   @players 12
@@ -52,24 +52,31 @@ defmodule Colony.Protocol do
   def snapshot(%World{} = world, you) do
     grid = world.grid
     p = world.p
+    rule = world.rule
+    costs = Tuple.to_list(rule.costs)
 
-    hello =
-      <<grid.width::16-little, grid.near_rows::8, grid.gap_rows::8, grid.far_rows::8,
-        grid.nest::16-little, grid.food::16-little, world.seed::32-little, you::16-little,
-        p.rate::8, round(p.step * p.rate * 10)::8, p.decay_ticks::16-little,
-        p.food_units::16-little>>
+    hello = [
+      <<grid.width::16-little, grid.near_rows::8, grid.rows::8, grid.nest::16-little,
+        world.seed::32-little, you::16-little, p.rate::8, round(p.step * p.rate * 10)::8,
+        p.decay_ticks::16-little, p.pile_units::16-little, rule.bank::8, length(costs)::8>>,
+      for(cost <- costs, do: <<cost::8>>),
+      for(width <- Tuple.to_list(grid.river), do: <<width::8>>)
+    ]
 
     workers =
       for {id, worker} <- world.workers do
         <<id::16-little, worker.cell::16-little, carry_flag(worker) ||| 2::8>>
       end
 
+    names =
+      for {id, player} <- world.players, do: name_record(id, player.name, player.helper != nil)
+
     IO.iodata_to_binary([
       <<world.tick::32-little>>,
       section(@hello, [hello]),
-      section(@names, for({id, player} <- world.players, do: name_record(id, player.name))),
+      section(@names, names),
       section(@worker_set, workers),
-      section(@locks, Enum.map(world.locked, &lock_record/1)),
+      section(@locks, for({cell, body} <- world.locked, do: lock_record({cell, body, 0}))),
       structure(world),
       section(@scent, for({cell, value} <- world.scent, do: <<cell::16-little, value::8>>)),
       food(world),
@@ -81,7 +88,10 @@ defmodule Colony.Protocol do
   def tick(%World{} = world, events) do
     IO.iodata_to_binary([
       <<world.tick::32-little>>,
-      section(@names, for({id, name} <- Enum.reverse(events.names), do: name_record(id, name))),
+      section(
+        @names,
+        for({id, name, helper?} <- Enum.reverse(events.names), do: name_record(id, name, helper?))
+      ),
       section(
         @worker_set,
         for {id, cell, flags} <- Enum.reverse(events.worker_set) do
@@ -94,12 +104,16 @@ defmodule Colony.Protocol do
       ),
       section(@worker_gone, for(id <- events.worker_gone, do: <<id::16-little>>)),
       section(@locks, events.locks |> Enum.reverse() |> Enum.map(&lock_record/1)),
-      section(@fell, for(cell <- events.fell, do: <<cell::16-little>>)),
       if(events.structure, do: structure(world), else: []),
       section(@scent, for({cell, value} <- events.scent, do: <<cell::16-little, value::8>>)),
       if(events.food, do: food(world), else: []),
       players(world)
     ])
+  end
+
+  @doc "A record of a bridge as a map for JSON."
+  def record(record) do
+    Map.take(record, [:id, :time, :seconds, :names, :bodies, :rows, :width, :food, :done, :first])
   end
 
   @doc "Reads a move from a client."
@@ -121,21 +135,18 @@ defmodule Colony.Protocol do
   defp structure(world) do
     bodies =
       for {cell, _} <- world.locked do
-        support = Map.get(world.supports, cell, 0.0)
-        <<cell::16-little, min(255, max(0, round(support * 2)))::8>>
+        <<cell::16-little, min(255, max(0, Map.get(world.supports, cell, 0)))::8>>
       end
 
     # A count of 0 is necessary here: it tells the client that no body is locked.
-    [
-      <<@structure::8, length(bodies)::16-little>>,
-      bodies,
-      <<@frontier::8, length(world.frontier)::16-little>>,
-      for(cell <- world.frontier, do: <<cell::16-little>>)
-    ]
+    [<<@structure::8, length(bodies)::16-little>>, bodies]
   end
 
   defp food(world) do
-    <<@food::8, 1::16-little, world.food_pile::16-little, world.food_nest::32-little>>
+    pile = world.pile
+
+    <<@food::8, 1::16-little, pile.id::16-little, pile.cell::16-little, pile.units::16-little,
+      world.food_nest::32-little>>
   end
 
   defp players(world) do
@@ -148,17 +159,19 @@ defmodule Colony.Protocol do
     section(@players, records)
   end
 
-  defp name_record(id, name), do: <<id::16-little, byte_size(name)::8, name::binary>>
+  defp name_record(id, name, helper?) do
+    <<id::16-little, if(helper?, do: 1, else: 0)::8, byte_size(name)::8, name::binary>>
+  end
 
-  defp lock_record({cell, body}) do
-    kind = if body.kind == :player, do: 1, else: 0
+  defp lock_record({cell, body, id}) do
+    kind = if body.helper, do: 2, else: 1
 
-    <<cell::16-little, kind::8, body.id::16-little, body.time::32-little, byte_size(body.name)::8,
+    <<cell::16-little, kind::8, id::16-little, body.time::32-little, byte_size(body.name)::8,
       body.name::binary>>
   end
 
-  defp carry_flag(%{carry: true}), do: 1
-  defp carry_flag(_), do: 0
+  defp carry_flag(%{carry: nil}), do: 0
+  defp carry_flag(_), do: 1
 
   defp position(value), do: min(65_535, max(0, round((value + 1) * 1000)))
 

@@ -2,9 +2,12 @@ defmodule ColonyWeb.WorldChannel do
   @moduledoc """
   The channel between one browser and the world.
 
-  Events to the client: "s" (all the state, binary), "t" (the changes of a tick, binary)
-  and "you" (a message for this player only).
-  Events from the client: "m" (move, binary), "lock" and "ping".
+  Events to the client: "s" (all the state, binary), "t" (the changes of a tick, binary),
+  "you" (a message for this player only), "records" (all the records of the bridges) and
+  "record" (one record that is new or that changed).
+  Events from the client: "m" (move, binary), "lock", "body" and "ping".
+
+  A message with wrong data gets the reply "error" or no reply. It does not stop the channel.
   """
 
   use Phoenix.Channel
@@ -29,6 +32,7 @@ defmodule ColonyWeb.WorldChannel do
     Process.monitor(Server)
     {:ok, id, snapshot} = Server.join(self(), clean_name(params["name"]), demo?)
     push(socket, "s", {:binary, snapshot})
+    push(socket, "records", %{records: Server.records()})
     {:noreply, assign(socket, :id, if(demo?, do: nil, else: id))}
   end
 
@@ -51,17 +55,32 @@ defmodule ColonyWeb.WorldChannel do
 
   def handle_in("lock", %{"cell" => cell} = params, %{assigns: %{id: id}} = socket)
       when id != nil and is_integer(cell) do
+    # `at` is the position of the body, as text. A value that is not correct text is not used.
     position =
-      case Base.decode64(params["at"] || "") do
-        {:ok, binary} -> binary
-        :error -> nil
+      with at when is_binary(at) <- params["at"],
+           {:ok, binary} <- Base.decode64(at) do
+        binary
+      else
+        _ -> nil
       end
 
     case Server.lock(id, cell, position) do
-      :ok -> {:reply, :ok, socket}
+      {:ok, body} -> {:reply, {:ok, body}, socket}
       :error -> {:reply, :error, socket}
     end
   end
+
+  def handle_in("lock", _params, socket), do: {:reply, :error, socket}
+
+  # The name, the time and the count of a locked body, for a player who taps it.
+  def handle_in("body", %{"cell" => cell}, socket) when is_integer(cell) do
+    case Server.body(cell) do
+      nil -> {:reply, :error, socket}
+      body -> {:reply, {:ok, body}, socket}
+    end
+  end
+
+  def handle_in("body", _params, socket), do: {:reply, :error, socket}
 
   def handle_in("ping", _params, socket), do: {:reply, :ok, socket}
 

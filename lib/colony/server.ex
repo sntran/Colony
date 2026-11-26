@@ -24,8 +24,19 @@ defmodule Colony.Server do
   @doc "A player tells where the body is."
   def move(id, binary), do: GenServer.cast(__MODULE__, {:move, id, binary})
 
-  @doc "A player locks the body into a cell. Returns `:ok` or `:error`."
+  @doc """
+  A player locks the body into a cell.
+
+  Returns `{:ok, body}` or `:error`. `body` is the new body of the player: `%{x, z, worker}`
+  for the body of a worker, or `%{wait: seconds}` when the colony has no free worker.
+  """
   def lock(id, cell, position), do: GenServer.call(__MODULE__, {:lock, id, cell, position})
+
+  @doc "The data of a locked body: name, time, and the number of bodies that went on it. Or nil."
+  def body(cell), do: GenServer.call(__MODULE__, {:body, cell})
+
+  @doc "The records of the bridges, the newest first."
+  def records, do: GenServer.call(__MODULE__, :records)
 
   @doc "The tick times in microseconds, sorted, and the size of the world. `reset: true` then removes the times."
   def stats(opts \\ []), do: GenServer.call(__MODULE__, {:stats, opts})
@@ -96,19 +107,49 @@ defmodule Colony.Server do
 
   def handle_call({:lock, id, cell, position}, _from, state) do
     world = apply_move(state.world, id, position)
-    {result, world} = World.lock(world, id, cell)
-    {:reply, if(result == :ok, do: :ok, else: :error), %{state | world: world}}
+
+    case World.lock(world, id, cell) do
+      {:ok, world} ->
+        reply =
+          case Map.fetch!(world.players, id) do
+            %{state: :alive} = player ->
+              %{x: player.x, z: player.z, worker: player.took}
+
+            _dead ->
+              %{wait: div(world.p.respawn_ticks, world.p.rate)}
+          end
+
+        {:reply, {:ok, reply}, %{state | world: world}}
+
+      {_error, world} ->
+        {:reply, :error, %{state | world: world}}
+    end
+  end
+
+  def handle_call({:body, cell}, _from, state) do
+    reply =
+      case World.body(state.world, cell) do
+        nil -> nil
+        body -> Map.take(body, [:name, :helper, :time, :crossings])
+      end
+
+    {:reply, reply, state}
+  end
+
+  def handle_call(:records, _from, state) do
+    {:reply, Enum.map(state.world.records, &Protocol.record/1), state}
   end
 
   def handle_call({:stats, opts}, _from, state) do
     stats = %{
       tick_times: Enum.sort(state.times),
       tick: state.world.tick,
-      workers: state.world.worker_count,
       free_workers: map_size(state.world.workers),
       locked: map_size(state.world.locked),
-      players: map_size(state.world.players),
-      food_pile: state.world.food_pile,
+      players: Enum.count(state.world.players, fn {_id, player} -> player.helper == nil end),
+      helpers: Enum.count(state.world.players, fn {_id, player} -> player.helper != nil end),
+      pile: state.world.pile,
+      records: length(state.world.records),
       food_nest: state.world.food_nest,
       scent_cells: map_size(state.world.scent),
       process_memory: Process.info(self(), :memory) |> elem(1)
@@ -138,6 +179,10 @@ defmodule Colony.Server do
 
     if state.clients != %{} do
       ColonyWeb.Endpoint.broadcast(@topic, "t", {:binary, Protocol.tick(world, events)})
+
+      for record <- Enum.reverse(events.records) do
+        ColonyWeb.Endpoint.broadcast(@topic, "record", Protocol.record(record))
+      end
     end
 
     if rem(world.tick, state.save_ticks) == 0, do: save_later(state.path, world)

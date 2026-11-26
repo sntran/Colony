@@ -8,7 +8,43 @@ defmodule Colony.Store do
   # The file reader accepts only atoms that the VM knows. In development the VM loads a
   # module at its first use, and the reader runs before the world module is used. This
   # list makes sure that the VM knows all the atoms of a save file when it reads one.
-  @atoms [:version, :seed, :locked, :scent, :food_pile, :food_nest, :worker, :player]
+  @atoms [
+    # The world.
+    :version,
+    :seed,
+    :locked,
+    :scent,
+    :pile,
+    :history,
+    :food_nest,
+    :food_credit,
+    :workers,
+    :records,
+    # The pile and the piles before it.
+    :id,
+    :cell,
+    :col,
+    :width,
+    :units,
+    :appeared,
+    :first_lock,
+    :taken,
+    :start,
+    # A record.
+    :time,
+    :seconds,
+    :names,
+    :name,
+    :helper,
+    :bodies,
+    :rows,
+    :food,
+    :done,
+    # Values.
+    nil,
+    true,
+    false
+  ]
 
   @doc "All the atoms that a save file can have."
   def atoms, do: @atoms

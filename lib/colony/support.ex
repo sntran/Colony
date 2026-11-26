@@ -2,32 +2,57 @@ defmodule Colony.Support do
   @moduledoc """
   The support rule.
 
-  A bank cell that touches the gap has the bank support. A locked body takes the highest
-  support of the cells that it touches, then it subtracts its cost. The cost is lower when
-  a locked body is beside it in the same row.
+  A bank cell that touches the river has the bank support. A locked body takes the highest
+  support of the cells that it touches, then it subtracts its cost.
 
-  The functions here take the set of locked cells as a map. Only the keys are used.
+  The cost of a body is 1 divided by `n`. `n` is the number of locked bodies in the line of
+  bodies with no hole, in the same row, that contains the body. The largest `n` that counts
+  is `row_max`. Thus each body beside a body helps.
+
+  All the numbers here are integers. With `row_max` 4, the costs are 1, 1/2, 1/3 and 1/4.
+  Each one is a whole number of twelfths: 12, 6, 4 and 3. The bank support 8 is 96.
+
+  The functions take the set of locked cells as a map. Only the keys are used.
   """
 
   alias Colony.Grid
 
-  @doc "Reads the three numbers of the rule from the game config."
+  @doc "Reads the numbers of the rule from the game config and makes them integers."
   def rule(cfg) do
+    row_max = Keyword.fetch!(cfg, :row_max)
+    scale = Enum.reduce(1..row_max, 1, fn n, acc -> div(acc * n, Integer.gcd(acc, n)) end)
+    bank = Keyword.fetch!(cfg, :bank_support) * scale
+    true = bank == trunc(bank)
+
     %{
-      bank: Keyword.fetch!(cfg, :bank_support) * 1.0,
-      alone: Keyword.fetch!(cfg, :cost_alone) * 1.0,
-      beside: Keyword.fetch!(cfg, :cost_beside) * 1.0
+      scale: scale,
+      bank: trunc(bank),
+      row_max: row_max,
+      # costs: the cost of a body in a line of 1, 2, ... bodies.
+      costs: List.to_tuple(for n <- 1..row_max, do: div(scale, n))
     }
   end
 
-  @doc "True if no locked body is beside the cell in the same row."
-  def alone?(grid, locked, cell) do
-    not Enum.any?(Grid.beside(grid, cell), &is_map_key(locked, &1))
+  @doc "The number of locked bodies in the line of bodies, in the row of the cell, that contains the cell."
+  def line(grid, locked, cell) do
+    width = grid.width
+    row = div(cell, width)
+    1 + count(locked, cell, -1, row, width) + count(locked, cell, 1, row, width)
   end
 
-  @doc "The cost of a body in a cell."
+  defp count(locked, cell, step, row, width) do
+    next = cell + step
+
+    if next >= 0 and div(next, width) == row and is_map_key(locked, next) do
+      1 + count(locked, next, step, row, width)
+    else
+      0
+    end
+  end
+
+  @doc "The cost of a body in a cell. The cell is in `locked`, or a body will be there."
   def cost(grid, rule, locked, cell) do
-    if alone?(grid, locked, cell), do: rule.alone, else: rule.beside
+    elem(rule.costs, min(line(grid, locked, cell), rule.row_max) - 1)
   end
 
   @doc """
@@ -38,7 +63,10 @@ defmodule Colony.Support do
   """
   def calculate(grid, rule, locked) do
     costs = Map.new(locked, fn {cell, _} -> {cell, cost(grid, rule, locked, cell)} end)
+    spread(grid, rule, costs)
+  end
 
+  defp spread(grid, rule, costs) do
     queue =
       for {cell, cost} <- costs, Grid.touches_bank?(grid, cell), reduce: :gb_sets.empty() do
         queue -> :gb_sets.add({-(rule.bank - cost), cell}, queue)
@@ -85,51 +113,100 @@ defmodule Colony.Support do
   defp settle(grid, rule, locked, fallen) do
     supports = calculate(grid, rule, locked)
 
-    case for {cell, _} <- locked, Map.get(supports, cell, 0.0) <= 0, do: cell do
+    case for {cell, _} <- locked, Map.get(supports, cell, 0) <= 0, do: cell do
       [] -> {supports, fallen}
       cells -> settle(grid, rule, Map.drop(locked, cells), cells ++ fallen)
     end
   end
 
-  @doc """
-  The support that a body gets if it locks into an empty gap cell.
+  @doc "The locked cells that touch each other, from one locked cell."
+  def group(grid, locked, cell), do: group(grid, locked, [cell], MapSet.new([cell]))
 
-  `supports` is the result of `calculate/3` for `locked`. The function does not calculate
-  all the grid again. A new body can change the cost only of the bodies beside it. The
-  bodies beside it touch the new cell. Thus the highest support near the new cell comes
-  from the values that are known, with that change of cost.
-  """
-  def support_for(grid, rule, locked, supports, cell) do
-    beside = Enum.filter(Grid.beside(grid, cell), &is_map_key(locked, &1))
-    cost = if beside == [], do: rule.alone, else: rule.beside
+  defp group(_grid, _locked, [], seen), do: seen
 
-    values =
+  defp group(grid, locked, [cell | rest], seen) do
+    more =
       for next <- Grid.neighbors(grid, cell),
-          Grid.kind(grid, next) != :gap or is_map_key(supports, next) do
-        cond do
-          Grid.kind(grid, next) != :gap ->
-            rule.bank
+          is_map_key(locked, next),
+          not MapSet.member?(seen, next),
+          do: next
 
-          next in beside and alone?(grid, locked, next) ->
-            Map.fetch!(supports, next) + rule.alone - rule.beside
+    group(grid, locked, more ++ rest, Enum.into(more, seen))
+  end
 
-          true ->
-            Map.fetch!(supports, next)
-        end
-      end
+  @doc """
+  The supports of a bridge if a body locks into an empty river cell.
 
-    case values do
-      [] -> nil
-      values -> Enum.max(values) - cost
+  The result is a map from cell to support, for the new cell and for all the locked cells
+  that touch it, directly or through other locked cells. A new body changes the cost of
+  all the bodies of its line, and each change can go from body to body. Thus this is a
+  full calculation for that group of bodies.
+  """
+  def with_body(grid, rule, locked, cell) do
+    locked = Map.put(locked, cell, true)
+    cells = group(grid, locked, cell)
+    costs = Map.new(cells, fn c -> {c, cost(grid, rule, locked, c)} end)
+    spread(grid, rule, costs)
+  end
+
+  @doc "The support that a body gets if it locks into an empty river cell, or 0."
+  def support_for(grid, rule, locked, cell) do
+    grid |> with_body(rule, locked, cell) |> Map.get(cell, 0)
+  end
+
+  @doc "True if a body can lock into the cell: the cell is an empty river cell and the support will be more than 0."
+  def can_lock?(grid, rule, locked, cell) do
+    Grid.kind(grid, cell) == :gap and not is_map_key(locked, cell) and
+      has_source?(grid, locked, cell) and support_for(grid, rule, locked, cell) > 0
+  end
+
+  # A cell that touches no bank and no body has no support. This is the usual case.
+  defp has_source?(grid, locked, cell) do
+    Enum.any?(Grid.neighbors(grid, cell), &(Grid.kind(grid, &1) != :gap or is_map_key(locked, &1)))
+  end
+
+  @doc """
+  The reach of a bridge: how far it can grow, one body wide, in a straight line to the far bank.
+
+  `supports` are the supports of the bodies of the bridge, and `locked` has these bodies.
+  Returns `{row, bank?}`: the highest river row that the bridge can get to, and true if
+  it can get to the far bank.
+  """
+  def reach(grid, rule, locked, supports) do
+    Enum.reduce(supports, {0, false}, fn {cell, support}, best ->
+      max_reach(best, grow(grid, rule, locked, cell, support))
+    end)
+  end
+
+  defp max_reach({row_a, bank_a} = a, {row_b, bank_b} = b) do
+    cond do
+      bank_a != bank_b -> if bank_a, do: a, else: b
+      row_a >= row_b -> a
+      true -> b
     end
   end
 
-  @doc "True if a body can lock into the cell: the cell is an empty gap cell and the support will be more than 0."
-  def can_lock?(grid, rule, locked, supports, cell) do
-    Grid.kind(grid, cell) == :gap and not is_map_key(locked, cell) and
-      case support_for(grid, rule, locked, supports, cell) do
-        nil -> false
-        support -> support > 0
-      end
+  # Goes from a body to the next row, again and again, while a body there has support.
+  defp grow(grid, rule, locked, cell, support) do
+    row = Grid.river_row(grid, cell)
+
+    case Grid.forward(grid, cell) do
+      [next | _] ->
+        cond do
+          Grid.kind(grid, next) != :gap ->
+            {row, true}
+
+          is_map_key(locked, next) ->
+            {row, false}
+
+          true ->
+            locked = Map.put(locked, next, true)
+            after_cost = support - cost(grid, rule, locked, next)
+            if after_cost > 0, do: grow(grid, rule, locked, next, after_cost), else: {row, false}
+        end
+
+      [] ->
+        {row, false}
+    end
   end
 end

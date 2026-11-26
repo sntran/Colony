@@ -17,6 +17,7 @@ end
 overrides =
   [
     workers: System.get_env("COLONY_WORKERS"),
+    helpers: System.get_env("COLONY_HELPERS"),
     seed: System.get_env("COLONY_SEED")
   ]
   |> Enum.reject(fn {_key, value} -> value in [nil, ""] end)

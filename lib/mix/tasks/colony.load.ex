@@ -1,13 +1,13 @@
 defmodule Mix.Tasks.Colony.Load do
-  @shortdoc "Runs the load test: 1,000 workers and 20 clients for 5 minutes"
+  @shortdoc "Runs the load test: 1,000 workers, 20 clients and 8 helpers for 5 minutes"
 
   @moduledoc """
   Runs the load test of plan 0001.
 
-      mix colony.load [--seconds 300] [--workers 1000] [--clients 20] [--port 4010]
+      mix colony.load [--seconds 300] [--workers 1000] [--clients 20] [--helpers 8] [--port 4010]
 
   The task starts the server with a new world that it does not save to the usual file.
-  The scent of the demo mode is on, thus the workers build a bridge and carry food.
+  The helpers build bridges to the piles, and the workers carry food.
   Each client is a real WebSocket connection. It joins the channel as a player, moves
   10 times each second near the nest, and counts the bytes that it gets.
 
@@ -23,12 +23,19 @@ defmodule Mix.Tasks.Colony.Load do
   def run(args) do
     {opts, _} =
       OptionParser.parse!(args,
-        strict: [seconds: :integer, workers: :integer, clients: :integer, port: :integer]
+        strict: [
+          seconds: :integer,
+          workers: :integer,
+          clients: :integer,
+          helpers: :integer,
+          port: :integer
+        ]
       )
 
     seconds = opts[:seconds] || 300
     workers = opts[:workers] || 1000
     clients = opts[:clients] || 20
+    helpers = opts[:helpers] || 8
     port = opts[:port] || 4010
 
     Mix.Task.run("app.config")
@@ -39,7 +46,12 @@ defmodule Mix.Tasks.Colony.Load do
     game =
       :colony
       |> Application.fetch_env!(:game)
-      |> Keyword.merge(workers: workers, save_file: save_file)
+      |> Keyword.merge(
+        workers: workers,
+        workers_max: max(workers, 200),
+        helpers: helpers,
+        save_file: save_file
+      )
 
     Application.put_env(:colony, :game, game)
 
@@ -52,21 +64,20 @@ defmodule Mix.Tasks.Colony.Load do
     Logger.configure(level: :warning)
     Mix.Task.run("app.start")
 
-    grid = Grid.new(game)
     rate = Keyword.fetch!(game, :tick_rate)
+    {nest_row, nest_col} = Keyword.fetch!(game, :nest)
+    nest = {nest_col + 0.5 * rem(nest_row, 2), nest_row * Grid.row_step()}
 
     Mix.shell().info(
-      "Load test: #{workers} workers, #{clients} clients, #{seconds} s, #{rate} ticks each second."
+      "Load test: #{workers} workers, #{clients} clients, #{helpers} helpers, #{seconds} s, " <>
+        "#{rate} ticks each second."
     )
-
-    # This process is a demo client: the scent of the demo mode is on while the test runs.
-    {:ok, _, _} = Server.join(self(), "Load", true)
 
     parent = self()
 
     pids =
       for n <- 1..clients do
-        spawn_link(fn -> client(parent, n, port, grid, seconds) end)
+        spawn_link(fn -> client(parent, n, port, nest, seconds) end)
       end
 
     # The first seconds are the start of the clients. They are not in the result.
@@ -133,7 +144,7 @@ defmodule Mix.Tasks.Colony.Load do
         mean                       #{round(Enum.sum(rates) / length(rates))}
         maximum                    #{round(worst)}   (target: 30,000 or less) #{verdict(worst <= 30_000)}
       ticks each second that a client got, minimum  #{Float.round(Enum.min(ticks), 2)}
-      world at the end             #{stats.free_workers} free workers, #{stats.locked} locked bodies, #{stats.players} players, #{stats.scent_cells} cells with scent, #{stats.food_nest} food at the nest
+      world at the end             #{stats.free_workers} free workers, #{stats.locked} locked bodies, #{stats.players} players, #{stats.helpers} helpers, #{stats.scent_cells} cells with scent, #{stats.food_nest} food at the nest, pile #{stats.pile.id} with #{stats.pile.units} units, #{stats.records} records
     """)
   end
 
@@ -143,7 +154,7 @@ defmodule Mix.Tasks.Colony.Load do
   # ---------------------------------------------------------------------------
   # One client: a WebSocket connection that uses the channel as a browser does.
 
-  defp client(parent, n, port, grid, seconds) do
+  defp client(parent, n, port, nest, seconds) do
     {:ok, socket} = :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false, nodelay: true])
     key = Base.encode64(:crypto.strong_rand_bytes(16))
 
@@ -159,7 +170,7 @@ defmodule Mix.Tasks.Colony.Load do
     send_frame(socket, 1, JSON.encode!(["1", "1", "world", "phx_join", %{name: name, demo: false}]))
     :inet.setopts(socket, active: true)
 
-    {x, z} = Grid.center(grid, grid.nest)
+    {x, z} = nest
     :timer.send_interval(100, :move)
     :timer.send_interval(30_000, :heartbeat)
     :rand.seed(:exsss, n)
@@ -167,8 +178,7 @@ defmodule Mix.Tasks.Colony.Load do
     state = %{
       parent: parent,
       socket: socket,
-      grid: grid,
-      nest: {x, z},
+      nest: nest,
       x: x,
       z: z,
       heading: :rand.uniform() * 6.28,

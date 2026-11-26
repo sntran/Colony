@@ -1,23 +1,25 @@
 defmodule Colony.SaveTest do
-  @moduledoc "Test 5 of the plan: save and load give the same world."
+  @moduledoc "Save and load keep the world: the bodies with their counts, the pile and the records."
 
   use ExUnit.Case, async: true
 
   alias Colony.{Sim, Store, World}
 
+  # A world with a bridge of helpers and of a player, a record, scent and food.
+  defp played do
+    cfg = Sim.cfg(helpers: 3, workers: 30, seed: 77, pile_units: 60)
+    {world, id} = World.join(World.new(cfg), "Bình")
+    world = Sim.lock!(world, id, Sim.river_cell(world, 1, 12))
+    {world, ticks} = Sim.run_until(world, 3000, &(&1.pile.id == 2 and &1.food_nest > 20))
+    true = ticks != nil
+    {cfg, world}
+  end
+
   @tag :tmp_dir
   test "save and load give the same world", %{tmp_dir: dir} do
-    cfg = Sim.cfg(workers: 200, seed: 77)
-    {world, id} = World.join(World.new(cfg), "Bình")
-
-    # A world with bodies of a player, bodies of workers, scent and food at the nest.
-    world =
-      Enum.reduce(1..3, world, fn n, world -> Sim.lock!(world, id, Sim.gap_cell(world, n, 12)) end)
-
-    world = world |> World.set_demo(true) |> Sim.run(400)
-    assert Sim.locked_workers(world) != []
+    {cfg, world} = played()
+    assert [%{id: 1, done: _}] = world.records
     assert world.scent != %{}
-    assert world.food_nest > 0
 
     path = Path.join(dir, "world.bin")
     saved = World.to_save(world)
@@ -25,38 +27,35 @@ defmodule Colony.SaveTest do
     {:ok, loaded} = Store.load(path)
     assert loaded == saved
 
-    again = World.new(cfg, loaded)
+    again = World.new(Keyword.merge(cfg, helpers: 0), loaded)
     assert World.to_save(again) == saved
     assert again.seed == world.seed
+    assert again.grid.river == world.grid.river
     assert again.supports == world.supports
-
-    assert again.frontier |> Enum.sort() ==
-             elem(World.take_events(World.flag(world, :structure)), 0).frontier |> Enum.sort()
-
-    assert again.food_pile == world.food_pile
+    assert again.pile == world.pile
     assert again.food_nest == world.food_nest
+    assert map_size(again.workers) == map_size(world.workers)
 
-    # The names and the times of the bodies of the player are there.
-    for n <- 1..3 do
-      cell = Sim.gap_cell(world, n, 12)
-      assert again.locked[cell].name == "Bình"
-      assert again.locked[cell].time == world.locked[cell].time
+    # The records and the counts of the bodies are there.
+    assert again.records == world.records
+    assert hd(again.records).names != []
+
+    for {cell, body} <- world.locked do
+      assert again.locked[cell].name == body.name
+      assert again.locked[cell].time == body.time
+      assert again.locked[cell].crossings == body.crossings
     end
 
-    # The number of workers is the same: the locked workers are locked, the others are free.
-    assert map_size(again.workers) + length(Sim.locked_workers(again)) == 200
+    assert Enum.any?(again.locked, fn {_cell, body} -> body.crossings > 0 end)
+    assert Enum.any?(again.locked, fn {_cell, body} -> body.name == "Bình" and not body.helper end)
+
+    # The world continues after the load: the carriers of the new workers bring food.
+    assert Sim.run(World.set_helpers(again, 3), 300).tick == 300
   end
 
   test "the store knows each atom of a save file" do
     # If an atom is not in the list of the store, a server that starts cannot read the file.
-    cfg = Sim.cfg(workers: 200, seed: 3)
-    {world, id} = World.join(World.new(cfg), "Dao")
-
-    world =
-      world |> Sim.lock!(id, Sim.gap_cell(world, 1, 12)) |> World.set_demo(true) |> Sim.run(300)
-
-    assert Sim.locked_workers(world) != []
-
+    {_cfg, world} = played()
     atoms = collect_atoms(World.to_save(world), MapSet.new())
     assert MapSet.subset?(atoms, MapSet.new(Store.atoms()))
   end
@@ -86,5 +85,14 @@ defmodule Colony.SaveTest do
     ExUnit.CaptureLog.capture_log(fn ->
       assert Store.load(path) == :none
     end)
+  end
+
+  test "a save file of plan 0001 gives a new world" do
+    old = %{version: 1, seed: 5, locked: [], scent: %{}, food_pile: 500, food_nest: 3}
+    world = World.new(Sim.cfg(), old)
+    assert world.seed == 5
+    assert world.locked == %{}
+    assert world.pile.id == 1
+    assert world.food_nest == 0
   end
 end
