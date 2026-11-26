@@ -147,6 +147,9 @@ async function alone(browser) {
   await session.shot(path.join(SHOTS, "05-at-the-food.jpg"));
   check(/food/.test(now.banner), `the page tells that the player is at the food: "${now.banner}"`);
   check(result.foodSeconds < 240, `the time is less than 4 minutes: ${result.foodSeconds} s`);
+  // The server refuses a move only for a fault. A player who plays by the rules gets none.
+  result.corrections = now.corrections;
+  check(now.corrections === 0, `the server refused no move of the player: ${now.corrections}`);
   check(session.errors.length === 0, "the page has no errors");
   await session.context.close();
   await stop();

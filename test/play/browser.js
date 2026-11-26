@@ -71,6 +71,7 @@ async function open(browser, kind, query = "") {
         workers: world.freeWorkers, players: world.players.size,
         grid: { width: grid.width, nearRows: grid.nearRows, gapRows: grid.gapRows, farRows: grid.farRows },
         nest: world.nest, food: world.food,
+        corrections: window.colony.corrections(),
         banner: document.getElementById("banner").hidden ? "" : document.getElementById("banner").textContent,
         lockReady: document.getElementById("lock").classList.contains("ready"),
       };

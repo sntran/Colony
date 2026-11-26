@@ -23,7 +23,10 @@ defmodule Colony.MixProject do
   defp deps do
     [
       {:phoenix, "~> 1.8"},
-      {:bandit, "~> 1.15"}
+      {:bandit, "~> 1.15"},
+      # The TLA+ contracts of the game. The checker is Elixir only. It is not in the server
+      # that runs: the tests and `mix accord.check` use it.
+      {:accord, github: "sntran/accord", branch: "feat/native-tla-checker", only: [:dev, :test]}
     ]
   end
 end

@@ -48,5 +48,7 @@ Add no notes about the tools that helped to write the code or the text.
 - Use no model, image, sound or font files. All things in the world come from code.
 - Do not add a build step for the page. The files in `priv/static` are the files that the
   browser gets.
+- Each rule of the world has a contract in TLA+ in `specs/`. For a change of a rule,
+  change the contract first and run `mix colony.contracts`. Then change the code.
 - Give each change of a rule a test in `test/`. The tests run the world with no browser.
 - Run `mix format` and `mix test` before each commit.

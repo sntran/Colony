@@ -6,10 +6,11 @@ This is the report of the tests of [plan 0001](../plans/0001-first-prototype.md)
 
 | Target | Result | Met |
 |---|---|---|
-| `mix test` shows the 5 results of section 5.1 | 24 tests, all pass | Yes |
+| `mix test` shows the 5 results of section 5.1 | 39 tests, all pass | Yes |
+| The TLA+ contracts of the world hold in all the states of their models | 4 models, 24,359 states | Yes |
 | Tick time, 95th percentile, 50 ms or less (1,000 workers, 20 clients) | 2.1 ms | Yes |
 | Each client gets 30 KB each second or less | 6.4 KB | Yes |
-| Cross the gap alone and touch the food in less than 4 minutes | 2 min 2 s, with 19 bodies | Yes, but see "Limits" |
+| Cross the gap alone and touch the food in less than 4 minutes | 2 min 8 s, with 19 bodies | Yes, but see "Limits" |
 | First load 500 KB or less after compression | 43 KB | Yes |
 | 30 frames each second on a phone with 1,000 bodies | Not measured | See "Limits" |
 
@@ -29,11 +30,12 @@ Read this first. It tells what the numbers below do not show.
 - **I did not measure a real phone.** Open the page with `?stats=1` on the phone. For
   1,000 bodies, start the server with `COLONY_WORKERS=1000` and open `?demo=1&stats=1`.
 - **"Lock my first body in less than 60 seconds with no instructions"** (section 8) is a
-  test for a person. The script locks its first body 5.5 seconds after the load.
+  test for a person. The script locks its first body 5.8 seconds after the load.
 
 ## 5.1 Automatic tests
 
-`mix test` runs the world with no browser: 24 tests in 0.8 seconds, all pass.
+`mix test` runs the world with no browser: 39 tests in 32 seconds, all pass. 14 of them
+are the tests of the TLA+ contracts: see "TLA+ contracts" below.
 
 | Result of the plan | Test | What the test shows |
 |---|---|---|
@@ -70,6 +72,9 @@ each second.
 The tick uses about 2% of its 100 ms. The bytes are 21% of the target. A later plan has
 room for more bodies and more players.
 
+After the change of the move rule (see "TLA+ contracts"), a run of 60 seconds gave the
+same numbers: 95th percentile 2.2 ms, and 6.6 KB each second for each client.
+
 ## 5.3 Play test
 
 ### 1. With 0 workers, cross the gap alone and touch the food
@@ -78,13 +83,14 @@ Phone size, touch events. Server: `COLONY_WORKERS=0`, new world.
 
 | Measure | Result |
 |---|---|
-| First lock | 5.5 s after the load |
+| First lock | 5.8 s after the load |
 | A bridge one cell wide stops | at 7 rows |
 | Bodies in the complete bridge | 19 |
-| Bridge complete | 1 min 53 s |
-| **At the food** | **2 min 2 s** (target: less than 4 minutes) |
+| Bridge complete | 1 min 58 s |
+| **At the food** | **2 min 8 s** (target: less than 4 minutes) |
+| Moves that the server refused | 0 |
 
-An earlier run on the same machine, with a slower picture, took 2 min 52 s. A person
+Other runs on the same machine took 2 min 2 s and, with a slower picture, 2 min 52 s. A person
 needs more time than the script: I expect 3 to 4 minutes for a player who knows the rule,
 and more for a new player. The target is not safe for a new player.
 
@@ -104,10 +110,10 @@ Desktop size, key events. I held Shift and W from the nest to the gap. I did not
 
 | Measure | Time after the load |
 |---|---|
-| The scent is at the gap | 2.9 s |
-| First lock of a worker | 5.0 s |
-| The bridge of the workers is complete (19 bodies) | 5.8 s |
-| **First unit of food at the nest** | **12.2 s** |
+| The scent is at the gap | 3.0 s |
+| First lock of a worker | 5.5 s |
+| The bridge of the workers is complete (19 bodies) | 5.9 s |
+| **First unit of food at the nest** | **12.4 s** |
 
 About one minute later the pile of 500 units was empty.
 
@@ -147,6 +153,71 @@ I stopped the server with the signal `TERM` and started it again.
 ![After the restart](0001/11-after-restart.jpg)
 
 The first run of this test **failed**: see fault 2 below.
+
+## TLA+ contracts
+
+After the tests above, I wrote the rules of the world as contracts in TLA+, in
+[`specs/`](../../specs/README.md). The native TLA+ checker of
+[accord](https://github.com/sntran/accord/tree/feat/native-tla-checker) checks them. Java
+is not necessary.
+
+### The checker looks at all the states of each model
+
+| Model | States | Time | Result |
+|---|---|---|---|
+| `Bridge`: a gap 2 cells wide and 3 rows | 593 | 4 s | All rules hold |
+| `BridgeOneWide`: the numbers of the plan, one cell wide | 255 | 5 s | No body after row 7 |
+| `Colony`: the small gap and one player | 6,094 | 42 s | All rules hold |
+| `BridgeWide`: a gap 3 cells wide and 3 rows | 17,417 | 223 s | All rules hold |
+
+The rules that hold in each state:
+
+- Each locked body has support.
+- The fast calculation of the support in the server gives the same number as the full
+  calculation.
+- A new body never makes a body fall.
+- A locked body of a player goes away only when it has no support.
+- A free body is never in the gap with no locked body below it.
+- A player loses a body only by a lock or by a fall, and a new body starts at the nest.
+
+For "a bridge one cell wide stops at 7 rows", the checker shows the two parts: no state
+has a body after row 7, and a state with a body in row 7 exists. It also reports the
+bridge of 7 bodies of a player as a state with no next step. That is the result of the
+plan, said by the checker.
+
+### The real world against the contract
+
+- **The monitor.** `Accord.Spec.Monitor` is between a test player and a real world. Two
+  players send 300 random messages in each of 6 runs. Three workers build, let go and
+  fall. Each message, each reply and each event must be a step of `Colony.tla`. After
+  each message, the monitor compares the locked bodies and the body of each player with
+  the contract. All the runs have no violation.
+- **A wrong world.** A test gives the world a bank support of 3.0 where the contract says
+  2.0. The monitor reports the first wrong lock and blames the server.
+- **200 workers on the grid of the game.** The scent starts, stops and starts again. The
+  workers made 103 locks and let go 15 times. Each one is a step of the contract, and the
+  bodies of the world are the bodies of the contract after each step.
+- **A bridge two cells wide.** The contract permits the 24 locks across the 12 rows, with
+  the numbers of the plan.
+
+### A fault that the monitor found
+
+**A body could jump across a cell.** In the first run of the monitor, the world said
+"ok" to a move from the nest to a cell two rows away, across a cell where a body cannot
+be. The contract says "no", and the monitor blamed the server. The world looked only at
+the end of a move and at its length. A changed client could jump across a hole of one
+cell in a bridge.
+
+Now the world looks at points along the straight way of each move, and a body can keep
+less movement for later. In play test 1, after this change, the server refused no move
+of the player.
+
+### Faults that the work found in the checker tools
+
+- `mix accord.check --extra` does not read `CHECK_DEADLOCK FALSE` from the config file:
+  `Accord.TLA.Engine` sets the deadlock check to "on" when the caller gives no option.
+  `Accord.TLA.Checker.check/2` reads the line correctly. `mix colony.contracts` uses the
+  checker directly.
 
 ## The other modes
 
@@ -195,6 +266,9 @@ The first run of this test **failed**: see fault 2 below.
    the stones are one shape, the page calculates each sine one time for a body and not for
    each vertex, and a screen with many pixels gets no smooth edges from the graphics card.
    I expect that these changes help a phone also.
+
+10. **A body could jump across a cell.** The TLA+ monitor found this: see "TLA+
+    contracts".
 
 ## Things that can confuse a new player
 

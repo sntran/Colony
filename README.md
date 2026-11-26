@@ -130,6 +130,23 @@ The tests run the world with no browser. They show the results that the plan ask
    they have support.
 5. Save and load give the same world.
 
+The tests also check the world against its contracts: see "Contracts" below.
+
+### Contracts
+
+The rules of the world are also in TLA+, in [`specs/`](specs/README.md). A TLA+ model
+checker in Elixir ([accord](https://github.com/sntran/accord/tree/feat/native-tla-checker))
+looks at all the states of small models of these contracts. Java is not necessary.
+
+```sh
+mix colony.contracts          # the usual models, about 1 minute
+mix colony.contracts --all    # and a larger model
+```
+
+`mix test` also puts a contract between a test player and the real world as a monitor.
+Each message, each reply and each event of the world must be a step that the contract
+permits. `mix test --include slow` also runs the checks that take minutes.
+
 ### Load test
 
 ```sh
@@ -173,8 +190,9 @@ node test/play/run.js
 | `lib/colony/store.ex` | The save file. |
 | `lib/colony/server.ex` | The process that moves the world 10 times each second. |
 | `lib/colony_web/` | The Phoenix endpoint, the channel and the plug that sends the page. |
-| `lib/mix/tasks/` | `mix colony.reset` and `mix colony.load`. |
+| `lib/mix/tasks/` | `mix colony.reset`, `mix colony.load` and `mix colony.contracts`. |
+| `specs/` | The contracts of the world in TLA+, and their models. |
 | `priv/static/` | The page: one HTML file and JavaScript modules. It draws with WebGL2. |
-| `test/` | The automatic tests. |
+| `test/` | The automatic tests. `test/play/` has the play tests in a browser. |
 
 The rules for a change are in [`CONTRIBUTING.md`](CONTRIBUTING.md).

@@ -45,6 +45,7 @@ $("swatch").style.background = cssColor(me.color);
 // Messages from the server
 
 let startTime = null;
+let corrections = 0;
 let seed = null;
 let dead = null;
 
@@ -95,6 +96,7 @@ const net = new Net(me.name, demo, {
       // The server did not accept a move. Go back to the position of the server.
       me.x = message.x;
       me.z = message.z;
+      corrections++;
     }
   },
   status(text) {
@@ -398,4 +400,4 @@ function frame(now) {
 requestAnimationFrame(frame);
 
 // For tests in a browser.
-window.colony = { world, net, camera, renderer, target: () => target };
+window.colony = { world, net, camera, renderer, target: () => target, corrections: () => corrections };

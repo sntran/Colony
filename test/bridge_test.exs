@@ -70,6 +70,33 @@ defmodule Colony.BridgeTest do
     assert [{^id, %{x: _, z: _}}] = events.you
   end
 
+  test "a free body cannot jump across a cell where a body cannot be", %{world: world, id: id} do
+    # Three bodies in a line. Without the body in the middle, there is a hole of one cell.
+    world =
+      Enum.reduce(1..3, world, fn n, world -> Sim.lock!(world, id, Sim.gap_cell(world, n, @col)) end)
+
+    first = Sim.gap_cell(world, 1, @col)
+    third = Sim.gap_cell(world, 3, @col)
+    world = Sim.walk(world, id, first)
+    # The body waits and gets all the movement that the world lets it keep.
+    world = Sim.run(world, 20)
+
+    # To the cell that does not touch: the world refuses, with and without a hole.
+    {x, z} = Grid.center(world.grid, third)
+    assert World.move(world, id, x, z, 0.0, false).players[id].cell == first
+
+    # From the far edge of the first cell, the third cell is near. With a body in the
+    # middle, the way is free. With a hole, the world refuses.
+    {x1, z1} = Grid.center(world.grid, first)
+    world = World.move(world, id, x1, z1 + 0.45, 0.0, false)
+    assert_in_delta world.players[id].z, z1 + 0.45, 0.001
+    world = Sim.run(world, 20)
+    assert World.move(world, id, x, z - 0.45, 0.0, false).players[id].cell == third
+
+    hole = %{world | locked: Map.delete(world.locked, Sim.gap_cell(world, 2, @col))}
+    assert World.move(hole, id, x, z - 0.45, 0.0, false).players[id].cell == first
+  end
+
   test "a player gets a new body at the nest one second after a lock", %{world: world, id: id} do
     world = Sim.lock!(world, id, Sim.gap_cell(world, 1, @col))
     assert {:dead, _} = world.players[id].state

@@ -52,6 +52,7 @@ defmodule Colony.World do
     worker_set: [],
     worker_gone: [],
     locks: [],
+    let_go: [],
     fell: [],
     scent: %{},
     names: [],
@@ -61,7 +62,14 @@ defmodule Colony.World do
   }
 
   # A player can keep this many cells of movement for later. It absorbs late messages.
-  @budget_cap 2.0
+  # It is less than the distance to a cell that does not touch the cell of the body
+  # (1.73): one move cannot go across a cell.
+  @budget_cap 1.5
+  # The world looks at points along the way of a move, this far apart.
+  @way_step 0.25
+  # A point of the way can be this far into a cell where a body cannot be. A body that
+  # goes around a corner between two messages does this.
+  @way_margin [{0.2, 0.0}, {-0.2, 0.0}, {0.1, 0.173}, {-0.1, 0.173}, {0.1, -0.173}, {-0.1, -0.173}]
   # A player touches the food from this distance.
   @food_touch 1.3
 
@@ -234,8 +242,9 @@ defmodule Colony.World do
   A player tells where the body is now.
 
   The world accepts the position only if the body can be there: the cell is a bank cell or
-  a locked body, and the distance is not more than the speed permits. If not, the body
-  stays where it was and the player gets the correct position.
+  a locked body, the distance is not more than the speed permits, and the straight way to
+  the position does not go across a cell where a body cannot be. If not, the body stays
+  where it was and the player gets the correct position.
   """
   def move(%__MODULE__{} = world, id, x, z, heading, scent?) do
     case world.players do
@@ -244,7 +253,8 @@ defmodule Colony.World do
         cell = Grid.cell_at(world.grid, x, z)
         player = %{player | heading: heading, scent: scent?}
 
-        if cell != nil and walkable?(world, cell) and distance <= player.budget + 0.05 do
+        if cell != nil and walkable?(world, cell) and distance <= player.budget + 0.05 and
+             clear_way?(world, player.x, player.z, x, z, distance) do
           player = %{player | x: x, z: z, cell: cell, budget: max(0.0, player.budget - distance)}
           %{world | players: Map.put(world.players, id, player)}
         else
@@ -278,6 +288,26 @@ defmodule Colony.World do
     else
       _ -> {{:error, :not_possible}, world}
     end
+  end
+
+  # True if each point along the straight way is on a cell where a body can be, or very
+  # near to such a cell.
+  defp clear_way?(world, x0, z0, x1, z1, distance) do
+    steps = ceil(distance / @way_step)
+
+    Enum.all?(1..(steps - 1)//1, fn step ->
+      part = step / steps
+      x = x0 + (x1 - x0) * part
+      z = z0 + (z1 - z0) * part
+
+      ground?(world, x, z) or
+        Enum.any?(@way_margin, fn {dx, dz} -> ground?(world, x + dx, z + dz) end)
+    end)
+  end
+
+  defp ground?(world, x, z) do
+    cell = Grid.cell_at(world.grid, x, z)
+    cell != nil and walkable?(world, cell)
   end
 
   defp kill_player(world, id, player, reason) do
@@ -537,6 +567,8 @@ defmodule Colony.World do
   # Then the bodies that have no support fall, and the free bodies that were on them fall.
   def remove(world, released) do
     released_cells = Enum.map(released, &elem(&1, 0))
+    # The clients do not get this event: they get the structure. The contract tests use it.
+    world = Enum.reduce(released_cells, world, &event(&2, :let_go, &1))
     locked = Map.drop(world.locked, released_cells)
     {supports, fallen} = Support.settle(world.grid, world.rule, locked)
     fallen_bodies = Map.take(locked, fallen)

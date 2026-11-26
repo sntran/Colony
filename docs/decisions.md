@@ -165,3 +165,50 @@ decide.
 49. **The player of the script** goes to the end of the bridge and locks in the next row.
     If that is not possible, it locks beside the body that is nearest to the end and alone
     in its row.
+
+### TLA+ contracts
+
+These decisions are from the work after the report: I added contracts in TLA+ and the
+native TLA+ checker of accord.
+
+50. **The package.** `accord` comes from the branch `feat/native-tla-checker` of
+    `sntran/accord`. `mix.lock` has the commit. It is a package for development and tests
+    only: the server that runs does not have it. It brings 8 other packages (pentiment,
+    makeup, makeup_elixir, makeup_erlang, nimble_parsec, propcheck, proper, libgraph). All
+    are Erlang or Elixir only.
+51. **Two contracts.** `specs/Bridge.tla` has the lock rule, the support rule and the
+    fall. `specs/Colony.tla` adds the free body of each player. `specs/README.md` tells
+    what each one says.
+52. **Half units.** The contracts use integers. A support or a cost in a contract is two
+    times the number of `config/game.exs`.
+53. **Small models.** The checker looks at all the states of a gap 2 cells wide and 3
+    rows, with bank support 2.0. With these numbers a bridge one cell wide stops at 1 row
+    and a bridge two cells wide crosses, as the numbers of the plan do at 7 and 12 rows.
+    The model with the numbers of the plan is one cell wide. A gap 2 cells wide and 12
+    rows has too many states for a check of all of them: a test follows one bridge there.
+54. **The monitor is in the tests, not in the server.** A step of the monitor is an
+    interpreter of TLA+. It takes some milliseconds. The server has 100 ms for a tick
+    with 1,000 workers.
+55. **A move in the contract is a move to a cell.** The contract says: a free body goes
+    to its cell or to a cell that touches it. The real world has positions. The test
+    moves a body from the center of a cell to the center of a cell.
+56. **Rule change: a move cannot go across a cell.** The monitor found that the world
+    accepted a move to a cell two rows away, across a cell where a body cannot be. The
+    world looked only at the end of a move and at its length. A changed client could jump
+    across a hole of one cell. Now a body can keep the movement for 1.5 cells, not 2.0,
+    and the world looks at points along the straight way of each move. A point can be 0.2
+    cells into a cell where a body cannot be: a body that goes around a corner between
+    two messages does this.
+57. **An event for the tests.** The world records the cells of the workers that let go.
+    The clients do not get this event. The contract tests need it: the step `LetGo` of
+    the contract has the set of these cells.
+58. **Where a worker can lock.** `Bridge.tla` explores bridges that grow from the near
+    bank: all the free bodies come from there. `Colony.tla` has no positions of workers,
+    thus a worker can lock there into each cell that will have support.
+59. **`mix colony.contracts`** calls the checker for each module. I do not use
+    `mix accord.check` for this: its engine sets the deadlock check to "on" and does not
+    read `CHECK_DEADLOCK FALSE` from the config file. A bridge of bodies of players only,
+    with no cell where a lock is possible, has no next step. That is correct, not a fault.
+60. **Slow checks.** `mix test` runs the checks that take seconds. The check of
+    `Colony.tla` and of `BridgeWide.tla` take minutes: `mix test --include slow` or
+    `mix colony.contracts --all`.
