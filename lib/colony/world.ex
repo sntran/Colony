@@ -631,11 +631,17 @@ defmodule Colony.World do
     {_row, nest_col} = Keyword.fetch!(world.cfg, :nest)
 
     col =
-      Enum.min_by(@pile_margin..(grid.width - 1 - @pile_margin), fn col ->
+      Enum.min_by(pile_columns(grid), fn col ->
         {Grid.river_width(grid, col), abs(col - nest_col)}
       end)
 
     make_pile(world, 1, col)
+  end
+
+  # The columns where a pile can be. A grid with few columns has a smaller margin.
+  defp pile_columns(grid) do
+    margin = min(@pile_margin, div(grid.width - 1, 2))
+    Enum.to_list(margin..(grid.width - 1 - margin))
   end
 
   defp make_pile(world, id, col) do
@@ -685,7 +691,12 @@ defmodule Colony.World do
 
   defp pile_column(world, id) do
     grid = world.grid
-    columns = Enum.reject(@pile_margin..(grid.width - 1 - @pile_margin), &(&1 == world.pile.col))
+
+    columns =
+      case Enum.reject(pile_columns(grid), &(&1 == world.pile.col)) do
+        [] -> [world.pile.col]
+        columns -> columns
+      end
 
     # A new pile is some columns or more from each complete bridge, if that is possible.
     bridge_columns =

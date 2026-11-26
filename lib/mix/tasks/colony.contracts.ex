@@ -4,30 +4,22 @@ defmodule Mix.Tasks.Colony.Contracts do
   @moduledoc """
   Checks the TLA+ contracts in `specs/` with the native TLA+ checker of accord.
 
-      mix colony.contracts [--all] [MODULE ...]
+      mix colony.contracts [MODULE ...]
 
-  With no module names, the task checks `Bridge`, `BridgeOneWide` and `Colony`. `--all`
-  adds `BridgeWide`, which takes more time. Each module has a config file with the same
-  name: the model that the checker explores.
+  With no module names, the task checks all the modules: `Bridge`, `BridgeWide`,
+  `BridgeOneWide`, `BridgeTwoWide`, `BridgeThreeWide` and `Colony`. Each module has a
+  config file with the same name: the model that the checker explores.
 
   The checker is a package for development and tests. It is not in a production build.
   """
 
   use Mix.Task
 
-  @usual ~w(Bridge BridgeOneWide Colony)
-  @slow ~w(BridgeWide)
+  @modules ~w(Bridge BridgeWide BridgeOneWide BridgeTwoWide BridgeThreeWide Colony)
 
   @impl true
   def run(args) do
-    {opts, names} = OptionParser.parse!(args, strict: [all: :boolean])
-
-    names =
-      cond do
-        names != [] -> names
-        opts[:all] -> @usual ++ @slow
-        true -> @usual
-      end
+    names = if args == [], do: @modules, else: args
 
     checker = Module.concat(["Accord", "TLA", "Checker"])
 
