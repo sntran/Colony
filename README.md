@@ -149,6 +149,17 @@ Play in a real browser. The steps and the last results are in the report in
 COLONY_WORKERS=0 COLONY_SAVE_FILE=/tmp/alone.bin mix phx.server
 ```
 
+The scripts in `test/play/` do the play tests of the plan in Chromium, with real touch
+events and real key events. They start and stop the server, and they write the screenshots
+of the report. They need Node.js and Playwright. Stop your server first: the scripts use
+port 4000.
+
+```sh
+npm install playwright
+npx playwright install chromium
+node test/play/run.js
+```
+
 ## The code
 
 | Path | Contents |

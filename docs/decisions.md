@@ -16,7 +16,7 @@ changed after a test. The newest plan is at the bottom.
    Elixir only.
 3. **No build step for the page.** The page is plain JavaScript modules in `priv/static`.
    The channel client is the file `phoenix.mjs` of the Phoenix package. The plug
-   `ColonyWeb.Static` sends the files with gzip. The first load is 42 KB after compression.
+   `ColonyWeb.Static` sends the files with gzip. The first load is 43 KB after compression.
 4. **The key of the endpoint.** The prototype has no accounts and signs nothing. The server
    makes a new random key at each start. `SECRET_KEY_BASE` can set it.
 5. **Values from the environment.** `COLONY_WORKERS`, `COLONY_SEED` and `COLONY_SAVE_FILE`
@@ -134,21 +134,34 @@ decide.
 41. **Fewer pixels.** The page uses 2 canvas pixels for each page pixel at most. If the
     picture is below 27 frames each second for 3 seconds, the page uses fewer pixels.
     `?scale=1` sets the number and stops the automatic change.
-42. **Slow frames.** The body of the player moves with the real time. A slow frame does not
+42. **Smooth edges.** A screen with 2 or more pixels for each page pixel gets no smooth
+    edges from the graphics card. The picture is then faster, and such a screen does not
+    need them. A phone has such a screen.
+43. **Slow frames.** The body of the player moves with the real time. A slow frame does not
     make the body slow.
 
 ### Demo mode
 
-43. **A demo client has no body.** While one or more demo clients are there, the server
+44. **A demo client has no body.** While one or more demo clients are there, the server
     puts scent on the straight line from the nest to the gap. The front of the scent moves
     at the speed of a body. The world is the same world that the players see.
-44. **The camera** goes from the nest to the middle of the gap in 14 seconds and turns
+45. **The camera** goes from the nest to the middle of the gap in 14 seconds and turns
     slowly. For a video from an empty gap, use `mix colony.reset` first.
 
 ### Load test
 
-45. **The clients** are real WebSocket connections from the same VM. Each one joins as a
+46. **The clients** are real WebSocket connections from the same VM. Each one joins as a
     player and moves 10 times each second near the nest. One of three puts scent. The scent
     of the demo mode is on, thus the 1,000 workers build a bridge and carry food.
-46. **The bytes** are all the bytes that a client gets after the handshake, with the
+47. **The bytes** are all the bytes that a client gets after the handshake, with the
     WebSocket frames and the channel headers.
+
+### Play test
+
+48. **A script plays.** The scripts in `test/play/` open the page in Chromium. They use
+    real touch events at 390 x 844 and real key events at 1280 x 800. They read the state
+    of the page to decide where to go. They need Node.js and Playwright. They are not part
+    of `mix test`.
+49. **The player of the script** goes to the end of the bridge and locks in the next row.
+    If that is not possible, it locks beside the body that is nearest to the end and alone
+    in its row.
