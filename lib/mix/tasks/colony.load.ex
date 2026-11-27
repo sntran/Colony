@@ -67,7 +67,9 @@ defmodule Mix.Tasks.Colony.Load do
     Application.put_env(:colony, :game, game)
     Mix.shell().info("Making a world of #{rivers} crossings and #{locked} locked bodies or more.")
     world = long_world(game, rivers, locked)
-    :ok = Store.save(save_file, %{World.to_save(world) | workers: %{carrier: carriers, spare: spare}})
+
+    :ok =
+      Store.save(save_file, %{World.to_save(world) | workers: %{carrier: carriers, spare: spare}})
 
     endpoint =
       :colony
