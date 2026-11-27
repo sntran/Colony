@@ -461,12 +461,13 @@ These are the decisions that the plan does not make. The plan is
 128. **A new pile calls workers.** Without a rule for this, the workers go to the nearest
      pile, and the first food of pile 4 comes only when piles 1 to 3 are empty: the
      world does not get complete. Thus:
-     - At a crossing, one of each three workers that waited, and 3 or more, goes across
-       the bridge to the pile. These are the workers at the end of the line. The workers
-       at the start of the line go to the next crossing place. After the last crossing,
-       all of them go to the pile.
+     - At a crossing, all the workers that waited go across the bridge. The worker at
+       the end of the line goes to the new pile. The others go to the next crossing
+       place. After the last crossing, all of them go to the pile.
      - Until the first food of a pile is at the nest, 3 workers go to that pile or carry
-       food from it. They are the workers with no food that are nearest to the pile.
+       food from it. They are the workers with no food that are nearest to the pile. A
+       worker that waits at the crossing place is called only if no other worker is
+       there.
 129. **A worker number is not used again in the tick of its lock.** A client then gets
      "worker gone" and "worker set" of one number in two messages.
 
@@ -531,3 +532,66 @@ These are the decisions that the plan does not make. The plan is
      and no bridge stops before the far land. This check needs 80 seconds or more.
 146. **The contract has the number of spare bodies, not the workers.** A lock subtracts
      one. The nest adds one. The contract permits each number of workers at the start.
+
+### The moment of a lock and of a crossing
+
+147. **The order of a lock on the page.** The note plays and the phone shakes when the
+     reply of the server comes. The light starts at the same time and flies for 0.4
+     seconds. The locked body goes down when the next message of the server has the lock:
+     0.1 seconds later or less. The ring on the water starts when the body is down.
+148. **The new body has the color of a worker while the light flies.** When the light
+     gets to it, it gets the color of the player and is large for a moment. The mark
+     above the body shows again at that time.
+149. **Each player sees the light of each lock**: the light of an other player flies to
+     the new body of that player, in the color of that player.
+150. **The camera shows the full bridge** only to a player who has a body in that bridge
+     or who is 40 cells or less from it. The other players get the record card
+     immediately. A change of the stick stops the camera after the first 0.3 seconds:
+     at the lock, the thumb is on the stick.
+151. **The record card shows after the camera**, for 6 seconds. The light and the number
+     of the next pile appear 3.4 seconds after the crossing.
+
+### Sound
+
+152. **The keys of the rivers** are G, D, B flat and G one octave lower: a longer river
+     has a lower key, thus the note of its last row is not too high. The scale is 0, 2,
+     4, 7 and 9 half tones. Row 1 is the first note, row 6 is one octave higher.
+153. **The limit is 8 lock notes each second.** The note of my own lock always plays. A
+     lock far away is quiet. The sounds of the nest play only near the nest, 4 each
+     second at most.
+154. **The page counts the notes** in `window.colony.sound.counts`. A test reads them.
+155. **The sound is on at the start.** The button keeps its state on the device.
+
+### The look
+
+156. **The seasons are colors**: the ground, the grass, the stones, the fog and the
+     light. The fog and the light change across each river. Spring has flowers, summer
+     has tall grass, winter has not much grass.
+157. **A worker that waits** looks to the pile across the river, moves its legs, and
+     moves a little to the front and back.
+158. **The page uses fewer pixels in steps**: 0.8 times at each step, down to 0.75
+     canvas pixels for each page pixel.
+
+### The story
+
+159. **The time of the story** is 0.3 seconds for each lock: 20 seconds or more, 40
+     seconds or less. The bodies appear at the same rate. The free bodies do not show
+     while the story plays.
+160. **The first tap on the cross goes to the end of the story.** The second tap closes
+     it. The end shows the world from above, the names, and the record of each bridge:
+     the list of the records of plan 0002 is here now.
+161. **The page shows the story one time when the world gets complete** while the page
+     is open, 5 seconds after the first food of the last pile. A page that opens a
+     complete world does not start the story: the button does.
+162. **The picture** is the world from above with 2 canvas pixels for each page pixel,
+     and a part below it with the numbers of the world and the names. The date is the
+     date of the first tick of the world. If the browser can share a file, the button
+     opens the share function. If not, it saves the file.
+163. **A new name** goes to the server in the message "name". The bodies that the player
+     locked before keep the old name.
+
+### The play session
+
+164. **The workflow file is on `main` and on the branch.** The file on `main` gets the
+     branch of its input and runs `scripts/play_session.sh` of that branch. It makes
+     sure that the branch has `mix.exs` and the script.

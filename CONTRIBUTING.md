@@ -12,7 +12,8 @@ documents, code comments, names, log text and commit messages.
 - Use the active voice and the present tense.
 - Use one word for one meaning, and the same word in all the files. The tables of words in
   the plans give the words of the game: body, player, worker, cell, row, bank, gap, nest,
-  support, scent, tick, river, pile, helper, reach, record.
+  support, scent, tick, river, pile, helper, record, land, spare body, open cell,
+  crossing, story.
 - Give one instruction in each sentence, and start it with the verb.
 - Do not use the "-ing" form of a verb, except in a technical name.
 
@@ -36,7 +37,7 @@ Add no notes about the tools that helped to write the code or the text.
 ## The work
 
 - Work on a branch with the number and the name of the plan, for example
-  `feat/0002-players-are-the-bridge`.
+  `feat/0003-the-crossing`.
 - Do not open a pull request unless I ask for it.
 - Stop and ask me only in two cases: a target of the plan cannot be met after real work, or
   a change is necessary in a section that the plan names for this.
@@ -52,6 +53,10 @@ Add no notes about the tools that helped to write the code or the text.
 - Each rule of the world has a contract in TLA+ in `specs/`. For a change of a rule,
   change the contract first and run `mix colony.contracts`. Then change the code.
 - Give each change of a rule a test in `test/`. The tests run the world with no browser.
+- The screen has no sentences. Use signs, numbers and names only. The signs are in
+  `priv/static/js/signs.js`.
+- The script of the new player (`test/play/newplayer.mjs`) knows only what a person sees.
+  If a play test fails with it, change the game, not the script.
 - A workflow gets no secret, and its token can only read the repo. Give each action its
   full commit hash. Compare the SHA-256 of each file that a script gets from the network.
 - Run `mix format` and `mix test` before each commit.
