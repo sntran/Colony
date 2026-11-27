@@ -14,8 +14,8 @@ defmodule Colony.Grid do
   line of cells. The river has a different width in each column, thus its north edge is
   not straight.
 
-  The grid has a number of rivers. A world with no end makes a new grid with more rivers
-  when it needs them: the rivers of one seed are always the same.
+  The world has no end. The grid has a number of rivers, and the world makes a new grid
+  with more rivers when it needs them: the rivers of one seed are always the same.
   """
 
   @row_step :math.sqrt(3) / 2
@@ -46,8 +46,7 @@ defmodule Colony.Grid do
 
   @doc """
   Makes the grid from the game config and the seed of the world, with `count` rivers. With
-  no count, the grid has the rivers of the config, or `rivers_ahead` rivers for a world
-  with no end.
+  no count, the grid has the rivers as far as `rivers_ahead` rivers after pile 1.
   """
   def new(cfg, seed, count \\ nil) do
     width = Keyword.fetch!(cfg, :width)
@@ -61,35 +60,54 @@ defmodule Colony.Grid do
       cfg
       |> rivers(seed, count)
       |> Enum.map_reduce(near, fn widths, start ->
-        most = Enum.max(widths)
-        {%{start: start, widths: List.to_tuple(widths), max: most}, start + most + land_rows}
+        {%{start: start, widths: widths}, start + Enum.max(widths) + land_rows}
       end)
+
+    build(width, rows, nest_row * width + nest_col, rivers)
+  end
+
+  @doc """
+  Makes the grid from its rivers: a list of `%{start, widths}`, with the width of the
+  river in each column as a list. A client that gets the rivers in a message makes the
+  same grid.
+  """
+  def build(width, rows, nest, rivers) do
+    rivers =
+      for river <- rivers do
+        widths = Enum.to_list(river.widths)
+        %{start: river.start, widths: List.to_tuple(widths), max: Enum.max(widths)}
+      end
 
     grid = %__MODULE__{
       width: width,
       rows: rows,
       count: width * rows,
-      nest: nest_row * width + nest_col,
+      nest: nest,
       rivers: List.to_tuple(rivers)
     }
 
     cells = 0..(grid.count - 1)
 
-    zones =
-      for cell <- cells do
-        row = div(cell, width)
-        col = rem(cell, width)
+    # For each row: the river that can have cells in the row, or the land before it.
+    # The rivers do not touch: a row has cells of one river at most.
+    {zones, _} =
+      Enum.flat_map_reduce(0..(rows - 1)//1, {0, rivers}, fn row, {land, ahead} ->
+        {land, ahead} = pass_rivers(row, land, ahead)
 
-        rivers
-        |> Enum.with_index(1)
-        |> Enum.reduce({0, 0}, fn {river, k}, zone ->
-          cond do
-            row < river.start -> zone
-            row < river.start + elem(river.widths, col) -> {k, k}
-            true -> {0, k}
-          end
-        end)
-      end
+        case ahead do
+          [river | _] when row >= river.start ->
+            k = land + 1
+
+            line =
+              for col <- 0..(width - 1),
+                  do: if(row < river.start + elem(river.widths, col), do: {k, k}, else: {0, k})
+
+            {line, {land, ahead}}
+
+          _ ->
+            {List.duplicate({0, land}, width), {land, ahead}}
+        end
+      end)
 
     neighbors = for cell <- cells, do: calculate_neighbors(grid, cell)
 
@@ -117,28 +135,32 @@ defmodule Colony.Grid do
     }
   end
 
-  # The number of rivers of a new grid.
-  defp first_count(cfg) do
-    if Keyword.get(cfg, :endless, false),
-      do: Keyword.fetch!(cfg, :rivers_ahead),
-      else: length(Keyword.fetch!(cfg, :rivers))
-  end
+  # The rivers that end before a row: the row is on the land after them.
+  defp pass_rivers(row, land, [river | rest]) when row >= river.start + river.max,
+    do: pass_rivers(row, land + 1, rest)
 
-  @doc "True if the world has no end: a grid can get more rivers."
-  def endless?(cfg), do: Keyword.get(cfg, :endless, false)
+  defp pass_rivers(_row, land, ahead), do: {land, ahead}
+
+  # The number of rivers of a new grid: pile 1 is on land 1, and the rivers go as far as
+  # `rivers_ahead` rivers after it.
+  defp first_count(cfg), do: 1 + Keyword.fetch!(cfg, :rivers_ahead)
 
   @doc """
-  The least and the largest width of river `k`, from the config. In a world with no end,
-  each river after the list has the widths of the last river of the list.
+  The grid with the rivers as far as `rivers_ahead` rivers after pile `k`. The grid gets
+  more rows at the north. The cells that the grid had do not change.
+  """
+  def ahead_of(%__MODULE__{} = grid, cfg, seed, k) do
+    count = k + Keyword.fetch!(cfg, :rivers_ahead)
+    if count > river_count(grid), do: new(cfg, seed, count), else: grid
+  end
+
+  @doc """
+  The least and the largest width of river `k`, from the config. Each river after the list
+  has the widths of the last river of the list.
   """
   def limits(cfg, k) do
     list = Keyword.fetch!(cfg, :rivers)
-
-    cond do
-      k <= length(list) -> Enum.at(list, k - 1)
-      endless?(cfg) -> List.last(list)
-      true -> nil
-    end
+    if k <= length(list), do: Enum.at(list, k - 1), else: List.last(list)
   end
 
   @doc """

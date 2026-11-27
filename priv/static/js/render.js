@@ -12,6 +12,15 @@ const SUN = [0.42, 0.8, -0.43];
 // The light of a new pile appears this many seconds after the page sees the pile: after
 // the camera showed the bridge of the crossing.
 export const PILE_LIGHT_DELAY = 3.4;
+// The world is in parts of this many rows. The page draws only the parts near the camera:
+// a long world does not make a frame slower.
+const PART_ROWS = 24;
+// The scenery has land this far around the cells, and this many things for each unit of
+// length along the world.
+const LAND_MARGIN = 7;
+const GRASS_EACH_UNIT = 94;
+const FLOWERS_EACH_UNIT = 4.4;
+const STONES_EACH_UNIT = 4.4;
 
 // The color of the fog and of the light in each season: spring, summer, autumn, winter.
 const AIR = [
@@ -343,6 +352,9 @@ export class Renderer {
     this.fog = AIR[0].fog;
     this.light = AIR[0].light;
     this.fogRange = [24, 62];
+    this.zRange = [-Infinity, Infinity];
+    this.parts = null;
+    this.partsDrawn = 0;
   }
 
   // Puts a shape on the graphics card.
@@ -414,26 +426,31 @@ export class Renderer {
     gl.bufferSubData(gl.ARRAY_BUFFER, 0, data, 0, length);
   }
 
-  // Makes the ground, the grass, the stones and the nest. This is done one time for a world.
+  // Makes the ground, the grass, the stones and the water of the world. The world is in
+  // parts of PART_ROWS rows: the page draws only the parts near the camera. When the grid
+  // gets more rivers, the page makes the new parts, and the part at the old north end
+  // again. The other parts stay.
   setWorld(world) {
     const gl = this.gl;
     const grid = world.grid;
-    const terrain = shapes.terrainMesh(grid, world.seed);
-    this.terrain = this.upload(terrain);
-    this.terrainVao = gl.createVertexArray();
-    gl.bindVertexArray(this.terrainVao);
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.terrain.vertices);
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.terrain.indices);
-    for (let i = 0; i < 3; i++) {
-      gl.enableVertexAttribArray(i);
-      gl.vertexAttribPointer(i, 3, gl.FLOAT, false, 36, i * 12);
+    const again = Boolean(this.parts) && this.seed === world.seed && this.grid && this.grid.width === grid.width && this.grid.rows <= grid.rows;
+    if (!again) {
+      for (const part of this.parts || []) this.dropPart(part);
+      this.parts = [];
+      this.seed = world.seed;
+      this.decorate(world);
     }
+    const keep = again ? Math.min(this.parts.length, Math.floor((this.grid.rows - 1) / PART_ROWS)) : 0;
+    for (const part of this.parts.splice(keep)) this.dropPart(part);
+    const count = Math.ceil(grid.rows / PART_ROWS);
+    for (let i = keep; i < count; i++) this.parts.push(this.makePart(world, i, count));
 
     // The water is one flat sheet below all the world. The land hides it where no river is.
-    const pad = terrain.columns;
+    if (this.waterMesh) this.drop(this.waterMesh, this.waterVao);
+    const pad = shapes.LAND_COLUMNS;
     const y = -shapes.WATER_DEPTH;
-    const south = -terrain.rowsBefore * ROW_STEP;
-    const north = (grid.rows + terrain.rowsAfter) * ROW_STEP;
+    const south = -shapes.LAND_ROWS_BEFORE * ROW_STEP;
+    const north = (grid.rows + shapes.LAND_ROWS_AFTER) * ROW_STEP;
     const water = this.upload({
       vertices: new Float32Array([-pad, y, south, grid.width + pad, y, south, grid.width + pad, y, north, -pad, y, north]),
       indices: new Uint16Array([0, 1, 2, 0, 2, 3]),
@@ -462,6 +479,8 @@ export class Renderer {
     // One number for each cell: 255 for a land cell, 128 for a locked body, 0 for water.
     // The ground draws the lines of the cells and the scent only on land. The water
     // draws foam at the land and at the locked bodies.
+    if (this.solidTexture) gl.deleteTexture(this.solidTexture);
+    if (this.scentTexture) gl.deleteTexture(this.scentTexture);
     this.solid = new Uint8Array(grid.count);
     this.solidTexture = texture(this.solid);
     this.scentTexture = texture(world.scent);
@@ -469,10 +488,54 @@ export class Renderer {
     // The middle of each river, for the change of the season along the world.
     this.riverMiddles = grid.rivers.map((river) => (river.start + Math.max(...river.widths) / 2) * ROW_STEP);
 
-    this.decorate(world, terrain);
     this.grid = grid;
     this.setSolid(world);
     this.ready = true;
+  }
+
+  // One part of the world: the ground, the grass and the stones of PART_ROWS rows. Part 0
+  // also has the land before row 0, and the last part has the land after the last row.
+  makePart(world, index, count) {
+    const gl = this.gl;
+    const grid = world.grid;
+    const first = index === 0;
+    const last = index === count - 1;
+    const from = first ? -Infinity : index * PART_ROWS;
+    const to = last ? Infinity : (index + 1) * PART_ROWS;
+    const terrain = shapes.terrainMesh(grid, world.seed, from, to);
+    const ground = this.upload(terrain);
+    const groundVao = gl.createVertexArray();
+    gl.bindVertexArray(groundVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, ground.vertices);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ground.indices);
+    for (let i = 0; i < 3; i++) {
+      gl.enableVertexAttribArray(i);
+      gl.vertexAttribPointer(i, 3, gl.FLOAT, false, 36, i * 12);
+    }
+    gl.bindVertexArray(null);
+
+    // The z of the south edge and of the north edge of the part, with a margin for the
+    // size of a cell.
+    const zFrom = first ? -Infinity : (index * PART_ROWS - 1) * ROW_STEP;
+    const zTo = last ? Infinity : (index + 1) * PART_ROWS * ROW_STEP;
+    const zEnd = (grid.rows - 1) * ROW_STEP;
+    const south = first ? -LAND_MARGIN : index * PART_ROWS * ROW_STEP - 0.5 * ROW_STEP;
+    const north = last ? zEnd + LAND_MARGIN : (index + 1) * PART_ROWS * ROW_STEP - 0.5 * ROW_STEP;
+    const scenery = this.scenery(world, terrain, index, south, north);
+    return { ground, groundVao, scenery: scenery.mesh, sceneryVao: scenery.vao, zFrom, zTo };
+  }
+
+  // Removes the buffers of a shape from the graphics card.
+  drop(mesh, vao) {
+    const gl = this.gl;
+    gl.deleteBuffer(mesh.vertices);
+    gl.deleteBuffer(mesh.indices);
+    gl.deleteVertexArray(vao);
+  }
+
+  dropPart(part) {
+    this.drop(part.ground, part.groundVao);
+    this.drop(part.scenery, part.sceneryVao);
   }
 
   // The land and the locked bodies changed.
@@ -488,48 +551,57 @@ export class Renderer {
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, grid.width, grid.rows, gl.RED, gl.UNSIGNED_BYTE, solid);
   }
 
-  // Puts the shape of the things that do not move on the graphics card.
-  setScenery(vertices, indices) {
-    const gl = this.gl;
-    this.scenery = this.upload({ vertices, indices, stride: 10 });
-    this.sceneryVao = gl.createVertexArray();
-    gl.bindVertexArray(this.sceneryVao);
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.scenery.vertices);
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.scenery.indices);
-    for (const [location, size, offset] of [[0, 3, 0], [1, 3, 12], [2, 3, 24], [6, 1, 36]]) {
-      gl.enableVertexAttribArray(location);
-      gl.vertexAttribPointer(location, size, gl.FLOAT, false, 40, offset);
+  // The pieces of the nest and of the food, from the seed of the world.
+  decorate(world) {
+    const random = shapes.randomFrom(world.seed ^ 0x51ed);
+    // The ring of earth of a nest: the places and the sizes of its pieces.
+    this.nestRing = [];
+    for (let i = 0; i < 13; i++) {
+      const angle = (i / 13) * 6.283;
+      this.nestRing.push([Math.cos(angle) * 0.62, Math.sin(angle) * 0.62, random() * 6.28, 0.2 + random() * 0.1, random() * 0.06]);
     }
-    // This shape has no instances: one position, one size and one color for all of it.
-    gl.vertexAttrib4f(3, 0, 0, 0, 0);
-    gl.vertexAttrib3f(4, 1, 1, 1);
-    gl.vertexAttrib4f(5, 1, 1, 1, 1);
-    gl.bindVertexArray(null);
+
+    // The places of the pieces of food in a pile and at the nest. The low pieces are first.
+    const heap = (count, radius, top) => {
+      const pieces = [];
+      for (let i = 0; i < count; i++) {
+        const r = radius * Math.sqrt(random());
+        const angle = random() * 6.283;
+        pieces.push([Math.cos(angle) * r, (1 - r / radius) * top * (0.3 + 0.7 * random()), Math.sin(angle) * r, random() * 6.28, 0.75 + random() * 0.5]);
+      }
+      return pieces.sort((a, b) => a[1] - b[1]);
+    };
+    this.pilePieces = heap(100, 1.0, 1.05);
+    this.nestPieces = heap(60, 0.5, 0.45);
   }
 
-  // Grass, stones and the nest, from the seed of the world.
-  decorate(world, terrain) {
+  // The grass and the stones of one part of the world, from the seed of the world and the
+  // number of the part: from `south` to `north` along the world. They do not move: they
+  // are one shape for each part, with position (3), normal (3), color (3) and wind (1)
+  // for each vertex.
+  scenery(world, terrain, index, south, north) {
+    const gl = this.gl;
     const grid = world.grid;
     const height = terrain.height;
-    const random = shapes.randomFrom(world.seed ^ 0x51ed);
+    const random = shapes.randomFrom((world.seed ^ 0x51ed) + index * 7919);
     const zEnd = (grid.rows - 1) * ROW_STEP;
-    const nest = [grid.x(world.nest), grid.z(world.nest)];
-    this.nest = nest;
-    this.grid = grid;
+    // The first nest has no grass in it.
+    const nest = [grid.x(grid.nest), grid.z(grid.nest)];
     const clear = (x, z) => Math.hypot(x - nest[0], z - nest[1]) > 1.1;
-    // A random point on land, `margin` cells or less outside of the grid, with its land.
+    const length = north - south;
+    // A random point on land, `margin` cells or less outside of the grid, with its land, or
+    // null. A part can have no land: all its rows are in a river.
     const point = (margin) => {
-      for (;;) {
+      for (let attempt = 0; attempt < 40; attempt++) {
         const x = -margin + random() * (grid.width + 2 * margin);
-        const z = -margin + random() * (zEnd + 2 * margin);
+        const z = south + random() * length;
         const row = Math.round(z / ROW_STEP);
         const col = Math.round(x - 0.5 * (row & 1));
         // Not on a river, and not on the last part of a cell at a river.
         if (terrain.isBank(row, col) && terrain.isBank(row + 1, col) && terrain.isBank(row - 1, col)) return [x, z, grid.zone(row, col)[1]];
       }
+      return null;
     };
-    // The grass, the stones and the nest do not move. They are one shape, made one time:
-    // position (3), normal (3), color (3) and wind (1) for each vertex.
     const vertices = [];
     const indices = [];
     const add = (mesh, x, yy, z, turn, sx, sy, sz, color, wind) => {
@@ -544,20 +616,22 @@ export class Renderer {
         const nx = source[i + 3] / sx;
         const ny = source[i + 4] / sy;
         const nz = source[i + 5] / sz;
-        const length = Math.hypot(nx, ny, nz) || 1;
+        const size = Math.hypot(nx, ny, nz) || 1;
         vertices.push(
           x + px * cos + pz * sin, yy + py, z - px * sin + pz * cos,
-          (nx * cos + nz * sin) / length, ny / length, (-nx * sin + nz * cos) / length,
+          (nx * cos + nz * sin) / size, ny / size, (-nx * sin + nz * cos) / size,
           color[0], color[1], color[2], wind * py
         );
       }
       for (const index of mesh.indices) indices.push(base + index);
     };
 
+    // The numbers of things for each unit of length along the world.
     const blade = shapes.grassMesh();
-    for (let i = 0; i < 9000; i++) {
-      const [x, z, land] = point(7);
-      if (!clear(x, z)) continue;
+    for (let i = 0, n = Math.round(GRASS_EACH_UNIT * length); i < n; i++) {
+      const at = point(7);
+      if (!at || !clear(at[0], at[1])) continue;
+      const [x, z, land] = at;
       const season = shapes.seasonOf(land);
       // Summer has tall grass. Winter has not much grass.
       if (season === 3 && random() < 0.6) continue;
@@ -568,17 +642,20 @@ export class Renderer {
     }
     // Spring has flowers: small points of color.
     const blob = shapes.blobMesh();
-    for (let i = 0; i < 420; i++) {
-      const [x, z, land] = point(4);
-      if (!clear(x, z) || land > 1) continue;
+    for (let i = 0, n = Math.round(FLOWERS_EACH_UNIT * length); i < n; i++) {
+      const at = point(4);
+      if (!at || !clear(at[0], at[1]) || shapes.seasonOf(at[2]) !== 0) continue;
+      const [x, z] = at;
       const color = [[1, 0.93, 0.5], [1, 0.75, 0.86], [0.96, 0.96, 1]][Math.floor(random() * 3)];
       add(blob, x, height(x, z) + 0.13, z, 0, 0.05, 0.04, 0.05, color, 0.3);
     }
 
-    for (let i = 0; i < 420; i++) {
+    for (let i = 0, n = Math.round(STONES_EACH_UNIT * length); i < n; i++) {
       // Small stones on the cells, large stones on the land around the cells.
-      const large = i >= 280;
-      const [x, z, land] = point(large ? 16 : 0);
+      const large = i % 3 === 2;
+      const at = point(large ? 16 : 0);
+      if (!at) continue;
+      const [x, z, land] = at;
       const inside = x > -1 && x < grid.width + 1 && z > -1 && z < zEnd + 1;
       if (!clear(x, z) || (large && inside)) continue;
       const size = large ? 0.5 + random() * 1.3 : 0.07 + random() * 0.13;
@@ -586,26 +663,22 @@ export class Renderer {
       const tone = 0.95 + random() * 0.4;
       add(blob, x, height(x, z) + size * 0.2, z, random() * 6.28, size * (0.8 + random() * 0.5), size * (0.5 + random() * 0.3), size, rock.map((part) => part * tone), 0);
     }
-    // The ring of earth of a nest: the places and the sizes of its pieces.
-    this.nestRing = [];
-    for (let i = 0; i < 13; i++) {
-      const angle = (i / 13) * 6.283;
-      this.nestRing.push([Math.cos(angle) * 0.62, Math.sin(angle) * 0.62, random() * 6.28, 0.2 + random() * 0.1, random() * 0.06]);
-    }
-    this.setScenery(new Float32Array(vertices), new Uint32Array(indices));
 
-    // The places of the pieces of food in a pile and at the nest. The low pieces are first.
-    const heap = (count, radius, top) => {
-      const pieces = [];
-      for (let i = 0; i < count; i++) {
-        const r = radius * Math.sqrt(random());
-        const angle = random() * 6.283;
-        pieces.push([Math.cos(angle) * r, (1 - r / radius) * top * (0.3 + 0.7 * random()), Math.sin(angle) * r, random() * 6.28, 0.75 + random() * 0.5]);
-      }
-      return pieces.sort((a, b) => a[1] - b[1]);
-    };
-    this.pilePieces = heap(100, 1.0, 1.05);
-    this.nestPieces = heap(60, 0.5, 0.45);
+    const mesh = this.upload({ vertices: new Float32Array(vertices), indices: new Uint32Array(indices), stride: 10 });
+    const vao = gl.createVertexArray();
+    gl.bindVertexArray(vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, mesh.vertices);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, mesh.indices);
+    for (const [location, size, offset] of [[0, 3, 0], [1, 3, 12], [2, 3, 24], [6, 1, 36]]) {
+      gl.enableVertexAttribArray(location);
+      gl.vertexAttribPointer(location, size, gl.FLOAT, false, 40, offset);
+    }
+    // This shape has no instances: one position, one size and one color for all of it.
+    gl.vertexAttrib4f(3, 0, 0, 0, 0);
+    gl.vertexAttrib3f(4, 1, 1, 1);
+    gl.vertexAttrib4f(5, 1, 1, 1, 1);
+    gl.bindVertexArray(null);
+    return { mesh, vao };
   }
 
   // The piles of food, the light above each pile, the nest with its food, and the old
@@ -689,18 +762,52 @@ export class Renderer {
     const reach = Math.hypot(camera.height, camera.distance);
     this.fogRange = [reach + 12, reach + 50];
     this.setSeason(camera.z);
+    this.zRange = this.seenRange();
   }
 
-  // The season at a place: spring before river 2, then summer, autumn and winter. The
-  // color of the fog and of the light changes across each river.
+  // The part of the world along its length that the camera can see: [south z, north z].
+  // A ray from a corner of the screen goes to the ground, or into the fog: after the end
+  // of the fog, the picture has only the color of the fog.
+  seenRange() {
+    const eye = this.eye;
+    const far = this.fogRange[1];
+    let south = eye[2];
+    let north = eye[2];
+    const width = this.canvas.clientWidth || 1;
+    const height = this.canvas.clientHeight || 1;
+    for (const [x, y] of [[0, 0], [width, 0], [0, height], [width, height], [width / 2, 0]]) {
+      let z;
+      const at = this.pick(x, y, 0);
+      if (at && Math.hypot(at[0] - eye[0], at[1] - eye[2]) < far) {
+        z = at[1];
+      } else {
+        // The ray goes above the ground, or the ground there is in the fog.
+        const { forward, right, up, tan, aspect } = this.basis;
+        const nx = (x / width) * 2 - 1;
+        const ny = 1 - (y / height) * 2;
+        const dx = forward[0] + right[0] * nx * tan * aspect + up[0] * ny * tan;
+        const dz = forward[2] + right[2] * nx * tan * aspect + up[2] * ny * tan;
+        const flat = Math.hypot(dx, dz) || 1;
+        z = eye[2] + (dz / flat) * far;
+      }
+      south = Math.min(south, z);
+      north = Math.max(north, z);
+    }
+    // A margin for the walls of the rivers, the hills and the large stones.
+    return [south - 6, north + 6];
+  }
+
+  // The season at a place: spring before river 2, then summer, autumn and winter, then
+  // spring again. The color of the fog and of the light changes across each river.
   setSeason(z) {
     let season = 0;
     this.riverMiddles.forEach((middle, index) => {
       if (index > 0) season += Math.max(0, Math.min(1, (z - middle) / 9 + 0.5));
     });
-    const low = Math.min(AIR.length - 1, Math.floor(season));
-    const high = Math.min(AIR.length - 1, low + 1);
-    const part = season - low;
+    const whole = Math.floor(season);
+    const low = whole % AIR.length;
+    const high = (whole + 1) % AIR.length;
+    const part = season - whole;
     this.fog = AIR[low].fog.map((value, i) => value + (AIR[high].fog[i] - value) * part);
     this.light = AIR[low].light.map((value, i) => value + (AIR[high].light[i] - value) * part);
   }
@@ -770,8 +877,12 @@ export class Renderer {
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.scentTexture);
     gl.uniform1i(this.ground.uniforms.uScent, 0);
-    gl.bindVertexArray(this.terrainVao);
-    gl.drawElements(gl.TRIANGLES, this.terrain.count, this.terrain.type, 0);
+    const parts = this.parts.filter((part) => part.zTo >= this.zRange[0] && part.zFrom <= this.zRange[1]);
+    this.partsDrawn = parts.length;
+    for (const part of parts) {
+      gl.bindVertexArray(part.groundVao);
+      gl.drawElements(gl.TRIANGLES, part.ground.count, part.ground.type, 0);
+    }
 
     start(this.water);
     gl.uniform2f(this.water.uniforms.uGrid, grid.width, grid.rows);
@@ -782,8 +893,10 @@ export class Renderer {
     // Solid shapes.
     start(this.shape);
     gl.uniform1i(this.shape.uniforms.uMode, 0);
-    gl.bindVertexArray(this.sceneryVao);
-    gl.drawElements(gl.TRIANGLES, this.scenery.count, this.scenery.type, 0);
+    for (const part of parts) {
+      gl.bindVertexArray(part.sceneryVao);
+      gl.drawElements(gl.TRIANGLES, part.scenery.count, part.scenery.type, 0);
+    }
     instances("nests");
     gl.uniform1i(this.shape.uniforms.uMode, 3);
     instances("food");

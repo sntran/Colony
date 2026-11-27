@@ -1,15 +1,15 @@
 defmodule Colony.PileTest do
   @moduledoc """
-  The piles, the food that a player carries, the records and the end of a world with an end:
-  plan 0004, 4.3 and 4.5, and plan 0003, 4.6 and 4.7.
+  The piles, the food that a player carries, the records and the story: plan 0004, 4.3 and
+  4.5, and plan 0003, 4.6 and 4.7.
   """
 
   use ExUnit.Case, async: true
 
   alias Colony.{Grid, Protocol, Sim, World}
 
-  @table_best %{11 => 16, 14 => 25, 18 => 41}
-  @table_random %{11 => 19, 14 => 34, 18 => 54}
+  @table_best %{11 => 16, 14 => 25, 18 => 41, 21 => 56, 24 => 73, 27 => 94}
+  @table_random %{11 => 19, 14 => 34, 18 => 54, 21 => 69, 24 => 85, 27 => 100}
 
   describe "the piles" do
     test "pile 1 is on land 1, 3 rows after the river, 10 columns or less from the nest" do
@@ -37,15 +37,22 @@ defmodule Colony.PileTest do
       for {width, random} <- @table_random, do: assert(world.p.bridge_random[width] == random)
 
       # Pile k pays for the bridge across river k + 1: 5 * 1.5 * R and 5 * 1.1 * B for the
-      # largest width of that river. The last pile of the world with an end has 600 units.
+      # largest width of that river. River 7 and each river after it are 27 rows wide at
+      # the most.
       assert World.pile_size(world, 1) == {round(5 * 1.5 * 19), round(5 * 1.1 * 16)}
       assert World.pile_size(world, 2) == {round(5 * 1.5 * 34), round(5 * 1.1 * 25)}
       assert World.pile_size(world, 3) == {round(5 * 1.5 * 54), round(5 * 1.1 * 41)}
-      assert World.pile_size(world, 4) == {600, 50}
+      assert World.pile_size(world, 4) == {round(5 * 1.5 * 69), round(5 * 1.1 * 56)}
+      assert World.pile_size(world, 5) == {round(5 * 1.5 * 85), round(5 * 1.1 * 73)}
+
+      for k <- 6..30 do
+        assert World.pile_size(world, k) == {round(5 * 1.5 * 100), round(5 * 1.1 * 94)}
+      end
+
       assert World.pile_size(world, 1) == {143, 88}
 
       {world, id} = World.join(World.new(Sim.cfg(spare: 200)), "Tester")
-      world = Enum.reduce(1..4, world, fn k, world -> Sim.cross!(world, id, k) end)
+      world = Enum.reduce(1..3, world, fn k, world -> Sim.cross!(world, id, k) end)
 
       for k <- 1..4 do
         {size, least} = World.pile_size(world, k)
@@ -118,9 +125,11 @@ defmodule Colony.PileTest do
       # 5 units make one spare body: 10 units make 2 spare bodies, at once, at the nest.
       assert World.spare(world) == spare + 2
 
+      # The walk to the cell of the path takes some ticks more: a new spare body can walk
+      # one cell in this time.
       new =
         for {_id, w} <- Sim.workers(world, :spare),
-            Grid.distance(world.grid, w.cell, world.nest) <= 1,
+            Grid.distance(world.grid, w.cell, world.nest) <= 2,
             do: w
 
       assert length(new) >= 2
@@ -212,20 +221,7 @@ defmodule Colony.PileTest do
     end
   end
 
-  describe "the end of a world with an end" do
-    test "the world is complete at the first food of the last pile" do
-      {world, id} = World.join(World.new(Sim.cfg(spare: 200, carriers: 12)), "Tester")
-      world = Enum.reduce(1..4, world, fn k, world -> Sim.cross!(world, id, k) end)
-      assert world.complete == nil
-      assert map_size(world.open) == 0
-
-      {world, ticks} = Sim.run_until(world, 6000, &(&1.complete != nil))
-      assert ticks != nil
-      assert world.piles[4].fed
-      later = Sim.run(world, 100)
-      assert later.complete == world.complete
-    end
-
+  describe "the story" do
     test "the story has all the locks in the order of their times, with the names, the food and the walks" do
       {world, ann} = World.join(World.new(Sim.cfg(spare: 60, rivers: [{6, 6}, {9, 9}])), "Ann")
       {world, bob} = World.join(world, "Bob")

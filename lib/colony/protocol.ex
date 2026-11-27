@@ -26,16 +26,19 @@ defmodule Colony.Protocol do
                      the locked bodies whose support changed.
       9  open        cell u32, gain u8. All the open cells.
       10 scent       cell u32, value u8
-      11 food        food at the nest u32, the river that the colony builds across u16,
-                     flags u8 (1 = the world is complete)
+      11 food        food at the nest u32, the river that the colony builds across u16
       12 players     player id u16, x u16, z u32, heading u8, flags u8 (1 = carries food)
       13 piles       pile id u16, cell u32, units u16, units at the start u16,
                      least units u16, flags u8 (1 = no body can walk to the pile).
                      In the snapshot: all the piles. In a tick: the piles that changed.
       14 nest        the cell of the nest u32, the number of old nests u16, then for each
                      old nest: cell u32, land u16
+      15 grid        the grid got more rivers: rows u16, the number of the first new river
+                     u16, the number of new rivers u16, then for each new river: its first
+                     row u16 and its width in each column, u8
 
-  A position is `(value + 1) * 500`. A heading is a part of a full turn times 256.
+  A cell and a position along the world (z) are u32: a world with 1,000 rows or more has
+  correct values. A position is `(value + 1) * 500`. A heading is a part of a full turn times 256.
   The supports and the costs are integers: see `Colony.Support`. An owner is the number of
   a person, or 0 for a helper.
 
@@ -63,6 +66,7 @@ defmodule Colony.Protocol do
   @players 12
   @piles 13
   @nest 14
+  @grid 15
 
   @doc "All the state, for a client that joins. `you` is the id of the player, or 0xFFFF."
   def snapshot(%World{} = world, you) do
@@ -83,9 +87,7 @@ defmodule Colony.Protocol do
         world.start || 0::32-little, rule.bank::8, length(costs)::8>>,
       for(cost <- costs, do: <<cost::8>>),
       <<tuple_size(grid.rivers)::16-little>>,
-      for river <- Tuple.to_list(grid.rivers) do
-        [<<river.start::16-little>>, for(width <- Tuple.to_list(river.widths), do: <<width::8>>)]
-      end
+      rivers(grid, 1)
     ]
 
     workers =
@@ -147,6 +149,7 @@ defmodule Colony.Protocol do
       if(events.food, do: food(world), else: []),
       if(events.piles != [], do: piles(world, Enum.uniq(events.piles)), else: []),
       if(events.nest, do: nest(world), else: []),
+      if(events.grid, do: grid(world, events.grid), else: []),
       players(world)
     ])
   end
@@ -202,8 +205,25 @@ defmodule Colony.Protocol do
   end
 
   defp food(world) do
-    <<@food::8, 1::16-little, world.food_nest::32-little, world.stage::16-little,
-      if(world.complete, do: 1, else: 0)::8>>
+    <<@food::8, 1::16-little, world.food_nest::32-little, world.stage::16-little>>
+  end
+
+  # The rivers of the grid from river `from`.
+  defp rivers(grid, from) do
+    for k <- from..tuple_size(grid.rivers)//1 do
+      river = elem(grid.rivers, k - 1)
+      [<<river.start::16-little>>, for(width <- Tuple.to_list(river.widths), do: <<width::8>>)]
+    end
+  end
+
+  defp grid(world, from) do
+    grid = world.grid
+    count = tuple_size(grid.rivers) - from + 1
+
+    [
+      <<@grid::8, 1::16-little, grid.rows::16-little, from::16-little, count::16-little>>,
+      rivers(grid, from)
+    ]
   end
 
   defp piles(world, ids) do

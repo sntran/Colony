@@ -242,25 +242,31 @@ defmodule Colony.WorkersTest do
     world =
       World.new(Sim.cfg(carriers: 12, spare: 10, helpers: 20, helper_lock_seconds: 0, seed: 4))
 
+    # Food comes all the time: while a pile with food is there, the time with no new food at
+    # the nest is not longer than one trip from the nest to the farthest pile with food and
+    # back, and 5 seconds. A carrier goes to the pile that is nearest to it, thus a carrier
+    # can be on such a trip. After a crossing of a wide river, a trip is long.
     {world, stats} =
       Enum.reduce(
         1..3000,
-        {world, %{carriers: 12, locks: 0, last_food: nil, gap: 0, food: 0}},
+        {world, %{carriers: 12, locks: 0, last_food: nil, gap: 0, over: 0, food: 0}},
         fn _, {world, stats} ->
           {world, events} = World.tick(world)
           carriers = World.carriers(world)
           assert carriers >= stats.carriers, "the carriers decreased at tick #{world.tick}"
 
-          # The longest time with no new food at the nest while a pile with food is there.
           stats =
-            cond do
-              world.food_nest > stats.food ->
+            case World.food_piles(world) do
+              _ when world.food_nest > stats.food ->
                 %{stats | last_food: world.tick, food: world.food_nest}
 
-              stats.last_food != nil and World.food_piles(world) != [] ->
-                %{stats | gap: max(stats.gap, world.tick - stats.last_food)}
+              [_ | _] = piles when stats.last_food != nil ->
+                steps = piles |> Enum.map(&Map.fetch!(world.walk, &1.cell)) |> Enum.max()
+                trip = round(2 * steps / world.p.step) + 50
+                gap = world.tick - stats.last_food
+                %{stats | gap: max(stats.gap, gap), over: max(stats.over, gap - trip)}
 
-              true ->
+              _ ->
                 %{stats | last_food: stats.last_food && world.tick}
             end
 
@@ -276,6 +282,6 @@ defmodule Colony.WorkersTest do
 
     assert stats.locks > 30
     assert world.food_nest > 100
-    assert stats.gap <= 150
+    assert stats.over <= 0, "#{stats.over / 10} s more than a trip with no food"
   end
 end

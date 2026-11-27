@@ -3,7 +3,7 @@ defmodule Colony.HelpersTest do
 
   use ExUnit.Case, async: true
 
-  alias Colony.{Grid, Sim, World}
+  alias Colony.{Sim, World}
 
   @moduletag timeout: 300_000
 
@@ -19,7 +19,7 @@ defmodule Colony.HelpersTest do
     assert map_size(World.set_helpers(world, 0).players) == 0
   end
 
-  test "four helpers and no player complete the four crossings" do
+  test "four helpers and no player make the four first crossings" do
     world = World.new(Sim.cfg(helpers: 4, spare: 30, seed: 1))
 
     {world, times, locks} =
@@ -32,19 +32,19 @@ defmodule Colony.HelpersTest do
 
         locks = locks ++ for({_cell, body, _id} <- events.locks, do: {tick, body.name})
 
-        if world.complete,
+        if world.stage > 4,
           do: {:halt, {world, times, locks}},
           else: {:cont, {world, times, locks}}
       end)
 
-    assert world.complete != nil
+    assert world.stage == 5
     assert Enum.map(times, &elem(&1, 0)) == [1, 2, 3, 4]
 
     IO.puts(
-      "\n  4 helpers, the four crossings: " <>
+      "\n  4 helpers, the four first crossings: " <>
         Enum.map_join(times, ", ", fn {k, tick, bodies} ->
           "river #{k} after #{div(tick, 10)} s with #{bodies} bodies"
-        end) <> ". The world is complete after #{div(world.tick, 10)} s."
+        end)
     )
 
     # The first bridge is complete in less than 60 seconds of world time.
@@ -106,7 +106,7 @@ defmodule Colony.HelpersTest do
            end)
 
     locks = map_size(world.locked)
-    {world, ticks} = Sim.run_until(world, 1200, &(map_size(&1.locked) > locks))
+    {_world, ticks} = Sim.run_until(world, 1200, &(map_size(&1.locked) > locks))
     assert ticks != nil
   end
 

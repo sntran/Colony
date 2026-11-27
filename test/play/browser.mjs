@@ -87,7 +87,7 @@ export async function open(browser, query = "", wait = true, before = null) {
       const { world, player } = window.colony;
       return {
         x: world.me.x, z: world.me.z, carry: world.me.carry, name: world.me.name,
-        spare: world.spare, carriers: world.carriers, food: world.foodNest, button: window.colony.button(), stage: world.stage, complete: world.complete,
+        spare: world.spare, carriers: world.carriers, food: world.foodNest, button: window.colony.button(), stage: world.stage,
         locks: player.locks, noLocks: player.noLocks, locked: world.locked.size, corrections: player.corrections,
         // The land that the body is on, or -1 on a bridge.
         land: ((cell) => (cell >= 0 && world.grid.kind(cell) === 0 ? world.grid.land(cell) : -1))(world.grid.cellAt(world.me.x, world.me.z)),

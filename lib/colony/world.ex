@@ -58,8 +58,7 @@ defmodule Colony.World do
             # The piles of food: id => %{id, cell, col, size, least, units, appeared,
             # crossed, fed}. Pile `k` is on land `k`.
             piles: %{},
-            # The river that the colony builds a bridge across now. In a world with an end,
-            # after the last crossing, it is the number of rivers plus 1.
+            # The river that the colony builds a bridge across now.
             stage: 1,
             # The open cells of the river `stage`: cell => gain.
             open: %{},
@@ -100,8 +99,6 @@ defmodule Colony.World do
             records: [],
             # The records that changed and that the clients do not have.
             records_dirty: [],
-            # The time when the world became complete, or nil.
-            complete: nil,
             # No helper locks before this tick.
             helper_tick: 0,
             events: nil
@@ -122,7 +119,9 @@ defmodule Colony.World do
     piles: [],
     open: false,
     food: false,
-    nest: false
+    nest: false,
+    # The grid got more rivers: the number of the first new river, or false.
+    grid: false
   }
 
   # A player can keep this many cells of movement for later. It absorbs late messages.
@@ -134,6 +133,9 @@ defmodule Colony.World do
   # A point of the way can be this far into a cell where a body cannot be. A body that
   # goes around a corner between two messages does this.
   @way_margin [{0.2, 0.0}, {-0.2, 0.0}, {0.1, 0.173}, {-0.1, 0.173}, {0.1, -0.173}, {-0.1, -0.173}]
+
+  # The map of the way to the crossing place goes this many steps farther than the nest.
+  @front_margin 30
 
   @doc """
   Makes a world from the game config.
@@ -160,8 +162,6 @@ defmodule Colony.World do
       pile_loss: Keyword.fetch!(cfg, :pile_loss_seconds),
       pile_factor: Keyword.fetch!(cfg, :pile_factor),
       pile_least_factor: Keyword.fetch!(cfg, :pile_least_factor),
-      last_pile_units: Keyword.fetch!(cfg, :last_pile_units),
-      last_pile_least: Keyword.fetch!(cfg, :last_pile_least),
       bridge_best: Keyword.fetch!(cfg, :bridge_best),
       bridge_random: Keyword.fetch!(cfg, :bridge_random),
       start_columns: Keyword.fetch!(cfg, :start_columns),
@@ -237,8 +237,7 @@ defmodule Colony.World do
       next_person: world.next_person,
       helper_food: world.helper_food,
       period: world.period,
-      records: world.records,
-      complete: world.complete
+      records: world.records
     }
   end
 
@@ -277,8 +276,7 @@ defmodule Colony.World do
         next_person: saved.next_person,
         helper_food: saved.helper_food,
         period: saved.period,
-        records: saved.records,
-        complete: saved.complete
+        records: saved.records
     }
   end
 
@@ -784,7 +782,6 @@ defmodule Colony.World do
     %{
       start: world.start,
       time: world.now,
-      complete: world.complete,
       crossings: world.stage - 1,
       rivers: rivers(world),
       food: world.food_nest,
@@ -881,15 +878,9 @@ defmodule Colony.World do
             end
 
           %{world | period: Map.update(world.period, key, units, &(&1 + units))}
-          |> count_last_record(player, key, units)
       end
 
-    # In a world with an end, the first food of the last pile makes the world complete.
-    if world.complete == nil and not Grid.endless?(world.cfg) and pile_id == rivers(world) do
-      flag(%{world | complete: world.now}, :food)
-    else
-      world
-    end
+    world
   end
 
   @doc false
@@ -975,9 +966,9 @@ defmodule Colony.World do
   # Pile `k` appears on land `k`, some rows after the river.
   defp add_pile(world, k) do
     grid = world.grid
-    {col, world} = pile_column(world, k)
-    row = Grid.river_start(grid, k) + Grid.river_width(grid, k, col) + world.p.pile_rows - 1
-    cell = Grid.cell(grid, row, col)
+    before = with %{col: col} <- Map.get(world.piles, k - 1), do: col
+    col = pile_column(world, k, before)
+    cell = pile_cell(world, k, col)
     {size, least} = pile_size(world, k)
 
     pile = %{
@@ -1008,46 +999,51 @@ defmodule Colony.World do
   Pile `k` pays for the bridge across river `k + 1`. With `R` the highest "Random" and `B`
   "Best" of the table of the open cells for the largest width of that river, the size is
   `food_per_body * pile_factor * R` and the least is `food_per_body * pile_least_factor * B`.
-  The last pile of a world with an end has numbers of its own.
   """
   def pile_size(world, k) do
     p = world.p
+    {_least, most} = Grid.limits(world.cfg, k + 1)
+    # The table starts at 5 rows. Across a narrower river, the best bridge is a straight
+    # line of bodies: one body for each row.
+    r = Map.get(p.bridge_random, most, most)
+    b = Map.get(p.bridge_best, most, most)
 
-    case Grid.limits(world.cfg, k + 1) do
-      nil ->
-        {p.last_pile_units, p.last_pile_least}
-
-      {_least, most} ->
-        r = Map.fetch!(p.bridge_random, most)
-        b = Map.fetch!(p.bridge_best, most)
-
-        {round(p.food_per_body * p.pile_factor * r),
-         round(p.food_per_body * p.pile_least_factor * b)}
-    end
+    {round(p.food_per_body * p.pile_factor * r), round(p.food_per_body * p.pile_least_factor * b)}
   end
 
-  # Pile 1 is near the column of the nest. Each later pile is 12 columns or less from the
-  # pile before it, and not near an edge of the world.
-  defp pile_column(world, k) do
+  @doc """
+  The column of pile `k`. `before` is the column of pile `k - 1`, or nil for pile 1.
+
+  Pile 1 is near the column of the nest. Each later pile is 12 columns or less from the
+  pile before it, and not near an edge of the world. The column comes from the seed and
+  the number of the pile: one seed gives the same piles each time.
+  """
+  def pile_column(world, k, before) do
     grid = world.grid
     last = grid.width - 1
     margin = min(world.p.pile_edge_columns, div(last, 2))
 
     {low, high} =
-      case Map.get(world.piles, k - 1) do
+      case before do
         nil ->
-          nest_col = Grid.col(grid, world.nest)
+          nest_col = Grid.col(grid, grid.nest)
 
           {max(0, nest_col - world.p.pile_first_columns),
            min(last, nest_col + world.p.pile_first_columns)}
 
         before ->
           shift = world.p.pile_shift_columns
-          {max(margin, before.col - shift), min(last - margin, before.col + shift)}
+          {max(margin, before - shift), min(last - margin, before + shift)}
       end
 
-    {n, rng} = :rand.uniform_s(high - low + 1, world.rng)
-    {low + n - 1, %{world | rng: rng}}
+    low + rem(:erlang.phash2({world.seed, :pile, k}), high - low + 1)
+  end
+
+  @doc "The cell of pile `k` in a column: on land `k`, some rows after the river."
+  def pile_cell(world, k, col) do
+    grid = world.grid
+    row = Grid.river_start(grid, k) + Grid.river_width(grid, k, col) + world.p.pile_rows - 1
+    Grid.cell(grid, row, col)
   end
 
   # A pile that no body can walk to loses units, down to its least number.
@@ -1075,8 +1071,24 @@ defmodule Colony.World do
     world = make_record(world, k, pile)
     world = %{world | period: %{}}
     world = move_nest(world, k)
-    world = if Grid.limits(world.cfg, k + 1), do: add_pile(world, k + 1), else: world
+    world = grow(world, k + 1)
+    world = add_pile(world, k + 1)
     flag(world, :food)
+  end
+
+  # The world has rivers as far as two rivers after the newest pile, pile `k`. The new rows
+  # are at the north: no cell of the old grid changes, and no body can walk to a new row.
+  defp grow(world, k) do
+    old = Grid.river_count(world.grid)
+    grid = Grid.ahead_of(world.grid, world.cfg, world.seed, k)
+
+    if Grid.river_count(grid) == old do
+      world
+    else
+      # The event has the number of the first new river.
+      from = min(old + 1, world.events.grid || old + 1)
+      %{world | grid: grid, events: %{world.events | grid: from}}
+    end
   end
 
   # The nest moves to the foot of the new bridge: some rows south of its first body. The
@@ -1192,33 +1204,6 @@ defmodule Colony.World do
 
   defp entry(_world, {:helper, name}, bodies, food) do
     %{name: name, helper: true, owner: nil, bodies: bodies, food: food}
-  end
-
-  # After the last crossing of a world with an end, the food that a player carries counts
-  # in the last record.
-  defp count_last_record(world, _player, key, units) do
-    with true <- world.stage > rivers(world) and not Grid.endless?(world.cfg),
-         [record | rest] <- world.records do
-      same? = fn entry ->
-        entry(world, key, 0, 0) |> Map.take([:name, :helper, :owner]) ==
-          Map.take(entry, [:name, :helper, :owner])
-      end
-
-      names =
-        case Enum.split_with(record.names, same?) do
-          {[entry], others} -> [%{entry | food: entry.food + units} | others]
-          {[], others} -> [entry(world, key, 0, units) | others]
-        end
-        |> Enum.sort_by(&{-&1.bodies, -&1.food, &1.name})
-
-      %{
-        world
-        | records: [%{record | names: names} | rest],
-          records_dirty: Enum.uniq([record.id | world.records_dirty])
-      }
-    else
-      _ -> world
-    end
   end
 
   # The clients get the records that changed, one time each second at most.
@@ -1406,8 +1391,16 @@ defmodule Colony.World do
     if sources == [] do
       %{world | front: %{}}
     else
+      # The map goes as far as the nest and some steps more. A spare body that is farther
+      # away walks to the nest first. Thus a long world does not make this map large.
+      limit =
+        case for(cell <- sources, steps = Map.get(world.walk, cell), do: steps) do
+          [] -> :infinity
+          list -> Enum.min(list) + @front_margin
+        end
+
       start = Map.new(sources, &{&1, 0})
-      %{world | front: flood(world.grid, sources, start, 1, :infinity, &walkable?(world, &1))}
+      %{world | front: flood(world.grid, sources, start, 1, limit, &walkable?(world, &1))}
     end
   end
 

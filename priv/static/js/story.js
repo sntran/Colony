@@ -1,14 +1,17 @@
 // The story of the colony: all the locked bodies appear in the order of their times, from
 // the nest to the north. At the end, the page shows the full world from above, with the
-// names. A button saves that picture.
+// names. A button saves that picture. The picture of a long world is taller: the page
+// draws it in parts, from the north to the south.
 
 import { ROW_STEP } from "./hex.js";
 import { colorOf, cssColor, HELPER_COLOR } from "./names.js";
 
-// The story plays in 20 to 40 seconds.
-const LEAST_SECONDS = 20;
+// The story takes 0.25 seconds for each body: 6 seconds at the least and 40 at the most.
+const LEAST_SECONDS = 6;
 const MOST_SECONDS = 40;
-const SECONDS_EACH_LOCK = 0.3;
+const SECONDS_EACH_LOCK = 0.25;
+// The picture has this many pixels in its length at the most.
+const PICTURE_MOST = 6000;
 // The camera goes from the play view to the view from above in this many seconds.
 const TURN_SECONDS = 2.2;
 const NAME_SECONDS = 2.6;
@@ -166,7 +169,7 @@ export class Story {
       const to = this.above();
       const part = smooth(Math.min(1, (this.time - this.endTime) / TURN_SECONDS));
       for (const name of ["x", "z", "turn", "height", "distance", "fov"]) camera[name] = mix(this.from[name], to[name], part);
-      camera.far = 600;
+      camera.far = to.far;
     }
   }
 
@@ -174,7 +177,7 @@ export class Story {
   wave() {}
 
   // The camera that shows the full world from above. On a tall screen, the world is at
-  // the top: the names are below it.
+  // the top, above the list of the names: the list can cover 38 percent of the screen.
   above() {
     const grid = this.world.grid;
     const width = grid.width + 3;
@@ -184,12 +187,37 @@ export class Story {
     const fov = (26 * Math.PI) / 180;
     const tan = Math.tan(fov / 2);
     // The world must be in the picture in its length and in its width.
-    const height = Math.max((north - south) / 2 / tan / 0.86, width / 2 / (tan * aspect) / 0.98);
+    const height = Math.max((north - south) / 2 / tan / 0.54, width / 2 / (tan * aspect) / 0.98);
     // The distance in the world for the height of the screen, and for the buttons at the top.
     const seen = 2 * height * tan;
     const top = (64 / this.canvas.clientHeight) * seen;
     const z = Math.min((north + south) / 2, north + top - seen / 2);
-    return { x: (grid.width - 0.5) / 2, z, turn: 0, height, distance: 0.01, fov };
+    return { x: (grid.width - 0.5) / 2, z, turn: 0, height, distance: 0.01, fov, far: Math.max(600, height * 1.3 + 50) };
+  }
+
+  // The cameras for the picture of the world, from the north to the south. Each camera
+  // looks down at one part of the world with the full width of the world on the screen.
+  // A short world has one part. Returns { cameras, length, north, south }: `length` is the
+  // part of the world along its length in each picture of the screen.
+  parts() {
+    const grid = this.world.grid;
+    const width = grid.width + 3;
+    const north = (grid.rows - 1) * ROW_STEP + 2.5;
+    const south = -2.5;
+    const aspect = this.canvas.clientWidth / this.canvas.clientHeight;
+    const fov = (26 * Math.PI) / 180;
+    const tan = Math.tan(fov / 2);
+    const height = width / 2 / (tan * aspect) / 0.98;
+    const length = 2 * height * tan;
+    const count = Math.ceil((north - south) / length);
+    const far = height * 1.3 + 50;
+    // A short world: one camera at the middle of the world.
+    if (count <= 1) return { cameras: [{ x: (grid.width - 0.5) / 2, z: (north + south) / 2, turn: 0, height, distance: 0.01, fov, far }], length, north, south };
+    const cameras = [];
+    for (let i = 0; i < count; i++) {
+      cameras.push({ x: (grid.width - 0.5) / 2, z: north - length * (i + 0.5), turn: 0, height, distance: 0.01, fov, far });
+    }
+    return { cameras, length, north, south };
   }
 
   // The part of the canvas that has the world, in canvas pixels: [x, y, width, height].
@@ -215,15 +243,54 @@ export class Story {
   // The picture
 
   // Makes the picture of the world from above as a PNG file: a promise of a Blob. The
-  // picture has the date and the names. `draw` draws the world on the canvas now.
+  // picture has the date and the names. `draw(camera, scale)` draws the world on the
+  // canvas now, with the camera and the number of canvas pixels for each page pixel.
   picture(draw) {
     const source = this.canvas;
-    draw();
-    // Only the part of the canvas that has the world goes into the picture.
-    const [left0, top0, width, height] = this.frame();
+    const { cameras, length, north, south } = this.parts();
+    let image;
+    let width;
+    let height;
+    if (cameras.length === 1) {
+      draw(cameras[0], 2);
+      // Only the part of the canvas that has the world goes into the picture.
+      const [left0, top0, w, h] = this.frame();
+      width = w;
+      height = h;
+      image = (g) => g.drawImage(source, left0, top0, width, height, 0, 0, width, height);
+      image.parts = null;
+    } else {
+      // A long world: one picture of the screen for each part, one below the other. The
+      // number of pixels is less for a very long world.
+      const scale = Math.max(1, Math.min(2, PICTURE_MOST / (cameras.length * source.clientHeight)));
+      const parts = document.createElement("canvas");
+      let partHeight = 0;
+      cameras.forEach((camera, index) => {
+        draw(camera, scale);
+        if (index === 0) {
+          width = source.width;
+          partHeight = source.height;
+          height = Math.round(((north - south) / length) * partHeight);
+          parts.width = width;
+          parts.height = height;
+        }
+        // The canvas has the picture only in the task that drew it.
+        parts.getContext("2d").drawImage(source, 0, index * partHeight);
+      });
+      image = (g) => g.drawImage(parts, 0, 0);
+    }
+    this.pictureParts = cameras.length;
     const unit = width / 390;
     const names = this.names;
-    const rows = Math.ceil(names.length / 2);
+    // Each name shows fully, with its numbers: one column when a name or its numbers are
+    // too long for two columns.
+    const measure = document.createElement("canvas").getContext("2d");
+    const font = (size, weight = 600) => `${weight} ${Math.round(size * unit)}px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif`;
+    measure.font = font(13, 500);
+    const numbers = (entry) => measure.measureText(`${entry.bodies}${entry.food}`).width + 36 * unit;
+    const fits = (entry) => measure.measureText(entry.name).width <= 108 * unit && numbers(entry) <= 56 * unit;
+    const columns = names.every(fits) ? 2 : 1;
+    const rows = Math.ceil(names.length / columns);
     const band = Math.round((54 + rows * 24) * unit);
     const out = document.createElement("canvas");
     out.width = width;
@@ -231,11 +298,9 @@ export class Story {
     const g = out.getContext("2d");
     g.fillStyle = "#16201c";
     g.fillRect(0, 0, out.width, out.height);
-    // The canvas has the picture only in the task that drew it.
-    g.drawImage(source, left0, top0, width, height, 0, 0, width, height);
+    image(g);
 
     // The name of the game and the date, on the picture.
-    const font = (size, weight = 600) => `${weight} ${Math.round(size * unit)}px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif`;
     const start = new Date((this.info && this.info.start ? this.info.start : this.world.startTime) * 1000);
     g.textBaseline = "middle";
     g.shadowColor = "rgba(0, 0, 0, 0.65)";
@@ -257,7 +322,7 @@ export class Story {
     const crossings = this.info ? this.info.crossings : this.world.stage - 1;
     let x = 16 * unit;
     x = this.sign(g, "river", x, top, unit) + 4 * unit;
-    x = this.text(g, `${crossings} / ${this.world.grid.rivers.length}`, x, top) + 16 * unit;
+    x = this.text(g, `${crossings}`, x, top) + 16 * unit;
     x = this.sign(g, "body", x, top, unit) + 4 * unit;
     x = this.text(g, `${this.world.locked.size}`, x, top) + 16 * unit;
     x = this.sign(g, "food", x, top, unit) + 4 * unit;
@@ -266,18 +331,17 @@ export class Story {
     this.pictureNames = [];
     g.font = font(13, 500);
     names.forEach((entry, index) => {
-      const column = index % 2;
-      const y = height + (54 + Math.floor(index / 2) * 24) * unit;
+      const column = index % columns;
+      const y = height + (54 + Math.floor(index / columns) * 24) * unit;
       const left = (16 + column * 187) * unit;
       g.fillStyle = cssColor(entry.helper ? HELPER_COLOR : colorOf(entry.name));
       g.beginPath();
       g.arc(left + 5 * unit, y, 5 * unit, 0, 6.3);
       g.fill();
       g.fillStyle = entry.helper ? "#b9c0c4" : "#fff";
-      let name = entry.name;
-      while (g.measureText(name).width > 108 * unit && name.length > 3) name = name.slice(0, -1);
-      g.fillText(name, left + 15 * unit, y);
-      let at = left + 127 * unit;
+      g.fillText(entry.name, left + 15 * unit, y);
+      // The numbers are after the longest name of the column.
+      let at = left + (columns === 2 ? 127 : 15 + Math.max(...names.map((other) => g.measureText(other.name).width / unit)) + 12) * unit;
       at = this.text(g, `${entry.bodies}`, at, y) + 2 * unit;
       at = this.sign(g, "body", at, y, unit * 0.8) + 8 * unit;
       at = this.text(g, `${entry.food}`, at, y) + 2 * unit;

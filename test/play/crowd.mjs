@@ -131,7 +131,7 @@ export class Client {
   }
 }
 
-// Runs the clients for some minutes, or until the world is complete. Returns the result.
+// Runs the clients for some minutes. Returns the result.
 export async function run(count, minutes, log = console.log, options = {}) {
   const clients = [];
   for (let n = 1; n <= count; n++) clients.push(new Client(`New ${String(n).padStart(2, "0")}`, { slow: options.slow, seed: n * 7919 + (options.seed || 0) }));
@@ -167,8 +167,7 @@ export async function run(count, minutes, log = console.log, options = {}) {
 
   await new Promise((resolve) => {
     const check = setInterval(() => {
-      const world = clients[0].world;
-      if ((world.ready && world.complete) || performance.now() - start > minutes * 60000) {
+      if (performance.now() - start > minutes * 60000) {
         clearInterval(check);
         resolve();
       }
@@ -190,7 +189,7 @@ export async function run(count, minutes, log = console.log, options = {}) {
     corrections: client.player.corrections,
   }));
   const world = clients[0].world;
-  const result = { clients: count, complete: world.complete, stage: world.stage, crossed: world.stage - 1, seconds, firstFood, crossings, players, noLock: players.filter((entry) => entry.locks === 0).length, noTrip: players.filter((entry) => entry.trips === 0).length, longestIdle: Math.max(...players.map((entry) => entry.longestIdle)) };
+  const result = { clients: count, stage: world.stage, crossed: world.stage - 1, seconds, firstFood, crossings, players, noLock: players.filter((entry) => entry.locks === 0).length, noTrip: players.filter((entry) => entry.trips === 0).length, longestIdle: Math.max(...players.map((entry) => entry.longestIdle)) };
   for (const client of clients) client.close();
   return result;
 }

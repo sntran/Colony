@@ -2,7 +2,8 @@
 //
 // A cell is an integer: row * width + column. The rows go from the south to the north.
 // The rows with an odd number are half a cell to the right. The world is land 0, river 1,
-// land 1, river 2, and so on.
+// land 1, river 2, and so on. The world has no end: the server sends more rivers when the
+// colony gets near them.
 
 export const ROW_STEP = Math.sqrt(3) / 2;
 
@@ -18,8 +19,8 @@ export class Grid {
     this.rivers = rivers;
     this.count = width * rows;
     // For each cell: 0 for land, or the number of its river. And the number of its land.
-    this.rivered = new Uint8Array(this.count);
-    this.lands = new Uint8Array(this.count);
+    this.rivered = new Uint16Array(this.count);
+    this.lands = new Uint16Array(this.count);
     for (let cell = 0; cell < this.count; cell++) {
       const row = Math.floor(cell / width);
       const [river, land] = this.zone(row, cell % width);

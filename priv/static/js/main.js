@@ -66,7 +66,8 @@ let records = [];
 // The time of the load of the page, and the time of the first food at the nest. A test reads them.
 const loadTime = performance.now();
 let firstFood = null;
-let wasComplete = null;
+// The grid that the renderer has: it changes when the server sends more rivers.
+let gridKey = -1;
 
 const guide = new Guide(world);
 let player;
@@ -74,8 +75,9 @@ let player;
 const net = new Net(me.name, look, {
   snapshot(buffer) {
     world.snapshot(buffer);
-    if (seed !== world.seed) {
+    if (seed !== world.seed || gridKey !== world.gridKey) {
       seed = world.seed;
+      gridKey = world.gridKey;
       renderer.setWorld(world);
     }
     world.scentDirty = true;
@@ -89,7 +91,6 @@ const net = new Net(me.name, look, {
       camera.x = me.x;
       camera.z = me.z + PLAYER_CAMERA.ahead;
     }
-    if (wasComplete === null) wasComplete = world.complete;
     $("status").hidden = true;
     $("top").hidden = false;
   },
@@ -196,6 +197,8 @@ let crossingsShown = 0;
 
 function crossing(record) {
   crossingsShown++;
+  // The story has a new part: its button flashes for some seconds.
+  again($("storyButton"), "news");
   const bodies = [...world.locked.values()].filter((body) => body.river === record.id).sort((a, b) => a.n - b.n);
   // The song of the bridge: its notes again, fast, in the order of the locks. Then a chord.
   const center = bodies.length > 0 ? bodies[Math.floor(bodies.length / 2)] : null;
@@ -383,12 +386,6 @@ function takeNews(now) {
     distance = Math.min(distance, Math.max(0, south - z, z - north));
   }
   sound.setWater(clamp(1 - distance / 7, 0.08, 1));
-
-  // When the world gets complete, each page shows the story one time.
-  if (world.complete && wasComplete === false) {
-    wasComplete = true;
-    setTimeout(() => story.open(), 5000);
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -736,7 +733,7 @@ function showStory() {
     element.append(sign(name), value);
     head.append(element);
   };
-  part("river", `${world.stage - 1} / ${world.grid.rivers.length}`);
+  part("river", `${world.stage - 1}`);
   part("body", `${world.locked.size}`);
   part("food", `${world.foodNest}`);
   const date = document.createElement("span");
@@ -744,7 +741,6 @@ function showStory() {
   date.textContent = new Date(world.startTime * 1000).toLocaleDateString();
   head.append(date);
   $("storyNames").replaceChildren(...story.names.map(nameItem));
-  $("storyNames").classList.toggle("few", story.names.length <= 3);
   $("storyRecords").replaceChildren(...[...records].sort((a, b) => a.id - b.id).map(recordElement));
 
   // The demo mode shows the story one time, then the live world with a slow camera.
@@ -752,15 +748,16 @@ function showStory() {
   if (demoPage) storyTimer = setTimeout(() => story.close(), 9000);
 }
 
-// Draws the world from above with many pixels, for the picture.
-function drawPicture() {
-  const scale = renderer.scale;
-  renderer.scale = Math.max(scale, 2);
+// Draws the world with a camera from above and with many pixels, for the picture. `scale`
+// is the number of canvas pixels for each page pixel.
+function drawPicture(view, scale) {
+  const before = renderer.scale;
+  renderer.scale = scale;
   renderer.resize();
-  renderer.setCamera({ ...story.above(), far: 600 });
+  renderer.setCamera(view);
   buildPicture(world.time);
   renderer.draw(world, world.time);
-  renderer.scale = scale;
+  renderer.scale = before;
 }
 
 // Not "click": a tap of the right thumb is not a click while the left thumb is on the stick.
@@ -854,6 +851,13 @@ function frame(now) {
     buildPicture(time);
     // The light of a new pile grows for some seconds.
     for (const pile of world.piles.values()) if (time - pile.born < PILE_LIGHT_DELAY + 2) world.foodDirty = true;
+    // The server sent more rivers: the renderer makes the new parts of the world.
+    if (gridKey !== world.gridKey) {
+      gridKey = world.gridKey;
+      renderer.setWorld(world);
+      solidKey = "";
+      world.scentDirty = true;
+    }
     if (world.scentDirty) {
       renderer.setScent(world);
       world.scentDirty = false;

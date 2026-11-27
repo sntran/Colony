@@ -112,8 +112,13 @@ defmodule Colony.ContractMonitorTest do
 
     # With no spare body, a lock is not possible.
     assert send!(context, {:tick, 12}) == :ok
-    assert send!(context, {:move, :p1, 3}) in [:ok, :no]
-    assert send!(context, {:move, :p1, 3}) == :ok
+    world = Contract.Server.world(context.server)
+    id = Contract.Server.ids(context.server)[:p1]
+
+    for cell <- Colony.Sim.path(world, world.players[id].cell, 3) do
+      assert send!(context, {:move, :p1, cell}) == :ok
+    end
+
     assert send!(context, {:lock, :p1, 9}) == {:error, -1}
 
     # The nest makes a worker each 10 seconds. Then the lock is possible.
@@ -171,12 +176,15 @@ defmodule Colony.ContractMonitorTest do
       :rand.seed(:exsss, unquote(seed))
       context = start(seed: unquote(seed))
 
+      # The contract has one river: the test stops at the crossing.
       replies =
-        Enum.reduce(1..220, %{}, fn _, replies ->
+        Enum.reduce_while(1..220, %{}, fn _, replies ->
           message = random_message(context)
           reply = send!(context, message)
           reply = if is_tuple(reply), do: elem(reply, 0), else: reply
-          Map.update(replies, {elem(message, 0), reply}, 1, &(&1 + 1))
+          replies = Map.update(replies, {elem(message, 0), reply}, 1, &(&1 + 1))
+          crossed? = Contract.Server.world(context.server).stage > 1
+          if crossed?, do: {:halt, replies}, else: {:cont, replies}
         end)
 
       # The run used the contract: moves and locks that the world accepted and refused,

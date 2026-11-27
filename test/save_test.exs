@@ -58,21 +58,25 @@ defmodule Colony.SaveTest do
   end
 
   @tag :tmp_dir
-  test "a complete world stays complete after a load", %{tmp_dir: dir} do
-    cfg = Sim.cfg(spare: 40, rivers: [{5, 5}, {9, 9}])
+  test "a long world keeps all its rivers after a load", %{tmp_dir: dir} do
+    cfg = Sim.cfg(spare: 60, rivers: [{5, 5}, {6, 6}])
     {world, id} = World.join(World.new(cfg), "Tester")
-    world = world |> Sim.cross!(id, 1) |> Sim.cross!(id, 2)
-    {world, ticks} = Sim.run_until(world, 3000, &(&1.complete != nil))
-    assert ticks != nil
+    world = Enum.reduce(1..4, world, &Sim.cross!(&2, id, &1))
+    # Pile 5 and two rivers after it.
+    assert World.rivers(world) == 7
+    assert world.stage == 5
 
     path = Path.join(dir, "world.bin")
     :ok = Store.save(path, World.to_save(world))
     {:ok, loaded} = Store.load(path, World.save_version())
     again = World.new(cfg, loaded)
-    assert again.complete == world.complete
-    assert again.stage == 3
-    assert map_size(again.open) == 0
-    assert World.story(again).complete == world.complete
+    assert again.grid == world.grid
+    assert again.stage == 5
+    assert again.open == world.open
+    assert again.nest == world.nest
+    assert again.old_nests == world.old_nests
+    assert again.piles == world.piles
+    assert map_size(again.locked) == map_size(world.locked)
   end
 
   test "the store knows each atom of a save file" do

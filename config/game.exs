@@ -14,11 +14,11 @@ config :colony, :game,
   land_rows: 8,
 
   # The rivers, from the south to the north: {the least width, the largest width} in rows.
-  # The width changes by 1 row or less from one column to the next.
-  rivers: [{5, 7}, {9, 11}, {12, 14}, {16, 18}],
-  # A world with no end: each river after the list has the widths of the last river.
-  endless: false,
-  # A world with no end has rivers as far as this many rivers after the newest pile.
+  # The width changes by 1 row or less from one column to the next. The world has no end:
+  # each river after the list has the widths of the last river of the list. No river is
+  # wider than 27 rows.
+  rivers: [{5, 7}, {9, 11}, {12, 14}, {16, 18}, {19, 21}, {22, 24}, {25, 27}],
+  # The world has rivers as far as this many rivers after the newest pile.
   rivers_ahead: 2,
 
   # The nest: {row, column}. At each crossing, the nest moves to the foot of the new
@@ -86,9 +86,6 @@ config :colony, :game,
   # units below food_per_body * pile_least_factor * B.
   pile_factor: 1.5,
   pile_least_factor: 1.1,
-  # The last pile of a world with an end.
-  last_pile_units: 600,
-  last_pile_least: 50,
   pile_rows_from_river: 3,
   # Pile 1 is this many columns or less from the column of the nest.
   pile_first_columns: 10,

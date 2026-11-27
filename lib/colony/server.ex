@@ -172,7 +172,7 @@ defmodule Colony.Server do
       helpers: Enum.count(state.world.players, fn {_id, player} -> player.helper != nil end),
       piles: state.world.piles,
       stage: state.world.stage,
-      complete: state.world.complete,
+      rivers: World.rivers(state.world),
       records: length(state.world.records),
       food_nest: state.world.food_nest,
       scent_cells: map_size(state.world.scent),

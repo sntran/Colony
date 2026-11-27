@@ -17,6 +17,7 @@ defmodule Colony.Mirror do
             decay_ticks: 10,
             rule: nil,
             rivers: [],
+            rows: 0,
             start: 0,
             workers: %{},
             structure: %{},
@@ -72,22 +73,18 @@ defmodule Colony.Mirror do
   defp record(
          mirror,
          1,
-         <<width::16-little, _rows::16-little, _seed::32, you::16-little, person::16-little,
+         <<width::16-little, rows::16-little, _seed::32, you::16-little, person::16-little,
            _rate::8, _speed::8, decay::16-little, start::32-little, bank::8, n::8,
            costs::binary-size(n), count::16-little, rest::binary>>
        ) do
     rule = %{bank: bank, costs: :binary.bin_to_list(costs)}
 
-    {rivers, rest} =
-      Enum.map_reduce(1..count//1, rest, fn _,
-                                            <<first::16-little, widths::binary-size(^width),
-                                              rest::binary>> ->
-        {%{start: first, widths: :binary.bin_to_list(widths)}, rest}
-      end)
+    {rivers, rest} = rivers(count, width, rest)
 
     mirror = %{
       mirror
-      | you: you,
+      | rows: rows,
+        you: you,
         person: person,
         decay_ticks: decay,
         rule: rule,
@@ -166,8 +163,8 @@ defmodule Colony.Mirror do
     {%{mirror | scent: Map.put(mirror.scent, cell, value)}, rest}
   end
 
-  defp record(mirror, 11, <<nest::32-little, stage::16-little, flags::8, rest::binary>>) do
-    {%{mirror | food: %{nest: nest, stage: stage, complete: flags == 1}}, rest}
+  defp record(mirror, 11, <<nest::32-little, stage::16-little, rest::binary>>) do
+    {%{mirror | food: %{nest: nest, stage: stage}}, rest}
   end
 
   defp record(
@@ -189,6 +186,20 @@ defmodule Colony.Mirror do
     {%{mirror | piles: Map.put(mirror.piles, id, pile)}, rest}
   end
 
+  # The grid got more rivers.
+  defp record(
+         mirror,
+         15,
+         <<rows::16-little, from::16-little, count::16-little, rest::binary>>
+       ) do
+    true = from == length(mirror.rivers) + 1
+    grid = mirror.grid
+    {rivers, rest} = rivers(count, grid.width, rest)
+    rivers = mirror.rivers ++ rivers
+    grid = Grid.build(grid.width, rows, grid.nest, rivers)
+    {%{mirror | grid: grid, rows: rows, rivers: rivers}, rest}
+  end
+
   defp record(mirror, 14, <<nest::32-little, count::16-little, rest::binary>>) do
     {old, rest} =
       Enum.map_reduce(1..count//1, rest, fn _, <<cell::32-little, land::16-little, rest::binary>> ->
@@ -204,5 +215,13 @@ defmodule Colony.Mirror do
       (flags &&& 4) != 0 -> :egg
       true -> nil
     end
+  end
+
+  defp rivers(count, width, binary) do
+    Enum.map_reduce(1..count//1, binary, fn _,
+                                            <<first::16-little, widths::binary-size(^width),
+                                              rest::binary>> ->
+      {%{start: first, widths: :binary.bin_to_list(widths)}, rest}
+    end)
   end
 end

@@ -45,6 +45,8 @@ defmodule Colony.Contract do
       near_rows: number.("NearRows"),
       land_rows: number.("FarRows"),
       rivers: [{rows, rows}],
+      # The contract has one river. The world gets the next river at the crossing.
+      rivers_ahead: 0,
       start_columns: width,
       bank_support: div(number.("Bank"), scale),
       row_max: length(costs),
@@ -254,6 +256,9 @@ defmodule Colony.Contract.Server do
         for {name, id} <- state.ids, into: %{}, do: {name, state.world.players[id].carry != nil}
 
       {world, events} = World.tick(state.world)
+      # The contract has one river. After the crossing, the next river is not part of the
+      # contract: the helpers go.
+      world = if world.stage > 1, do: World.set_helpers(world, 0), else: world
       state = %{state | world: world}
 
       # The food of the players: taken at a pile, or given to the nest.

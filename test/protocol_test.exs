@@ -27,11 +27,15 @@ defmodule Colony.ProtocolTest do
     assert mirror.nest == world.nest
     assert mirror.old_nests == world.old_nests
 
-    assert mirror.food == %{
-             nest: world.food_nest,
-             stage: world.stage,
-             complete: world.complete != nil
-           }
+    assert mirror.food == %{nest: world.food_nest, stage: world.stage}
+
+    assert mirror.rivers ==
+             for(
+               river <- Tuple.to_list(world.grid.rivers),
+               do: %{start: river.start, widths: Tuple.to_list(river.widths)}
+             )
+
+    assert mirror.rows == world.grid.rows
 
     assert mirror.piles ==
              Map.new(world.piles, fn {id, pile} ->
@@ -74,7 +78,8 @@ defmodule Colony.ProtocolTest do
                do: %{start: river.start, widths: Tuple.to_list(river.widths)}
              )
 
-    assert length(mirror.rivers) == 4
+    # Pile 1 and two rivers after it.
+    assert length(mirror.rivers) == 3
     assert mirror.rule == %{bank: 96, costs: [12, 6, 4, 3]}
     assert mirror.you == 0xFFFF
     assert mirror.open == world.open
@@ -82,12 +87,25 @@ defmodule Colony.ProtocolTest do
     assert mirror.nest == world.nest
   end
 
-  test "a position of the full world keeps its value" do
-    world = World.new(Sim.cfg())
-    {x, z} = Colony.Grid.center(world.grid, world.grid.count - 1)
-    assert {:ok, x2, z2, _heading} = Protocol.decode_move(Protocol.encode_move(x, z, 0.0))
-    assert_in_delta x, x2, 0.002
-    assert_in_delta z, z2, 0.002
+  test "a position in a world of 1,000 rows or more keeps its value" do
+    grid = Colony.Grid.new(Sim.cfg(), 1, 32)
+    assert grid.rows >= 1000
+
+    for cell <- [0, div(grid.count, 2), grid.count - 1] do
+      {x, z} = Colony.Grid.center(grid, cell)
+      assert {:ok, x2, z2, _heading} = Protocol.decode_move(Protocol.encode_move(x, z, 0.0))
+      assert_in_delta x, x2, 0.002
+      assert_in_delta z, z2, 0.002
+    end
+
+    # The snapshot of a long world has all the rivers and the correct cells.
+    world = %{World.new(Sim.cfg()) | grid: grid}
+    cell = grid.count - 1
+    world = %{world | scent: %{cell => 40}}
+    mirror = Mirror.new(grid, Protocol.snapshot(world, 0xFFFF))
+    assert length(mirror.rivers) == 32
+    assert mirror.rows == grid.rows
+    assert mirror.scent == %{cell => 40}
   end
 
   test "a client that joins late and reads each tick stays the same as the world" do
@@ -127,6 +145,8 @@ defmodule Colony.ProtocolTest do
     assert world.next_worker > 30 or world.free_ids != []
     assert mirror.players[id]
     assert world.old_nests != []
+    # The grid got more rivers: the mirror has them.
+    assert length(mirror.rivers) > 3
   end
 
   test "a record is a map that JSON can have" do

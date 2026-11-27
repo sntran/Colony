@@ -36,25 +36,34 @@ defmodule ColonyWeb.ChannelTest do
     %{socket: socket, snapshot: snapshot}
   end
 
-  # Goes to the edge of land 0 in the column of the nest. Returns the river cell after it.
-  # With the seed of this test, that cell is open: the pile is 6 columns or less from it.
+  # Goes to the edge of land 0 in the column of pile 1, then to the river. Returns the
+  # cell of the river after it: the first body of a bridge locks 6 columns or less from
+  # the column of the pile.
   defp move_to_river(socket) do
-    position = fn row ->
-      Colony.Protocol.encode_move(30 + 0.5 * rem(row, 2), row * Colony.Grid.row_step(), 0.0)
-    end
+    world = :sys.get_state(Colony.Server).world
+    col = world.piles[1].col
+    step = Colony.Grid.row_step()
+    {nest_row, nest_col} = {div(world.nest, 60), rem(world.nest, 60)}
+    x = fn row, c -> c + 0.5 * rem(row, 2) end
 
-    for row <- 7..13 do
+    # Along the row of the nest to the column of the pile, then to the north.
+    way =
+      for(c <- nest_col..col//if(col >= nest_col, do: 1, else: -1), do: {x.(nest_row, c), nest_row}) ++
+        for row <- (nest_row + 1)..13, do: {x.(row, col), row}
+
+    for {x, row} <- way do
       # The speed permits one cell each 3 ticks.
       Process.sleep(320)
-      push(socket, "m", {:binary, position.(row)})
+      push(socket, "m", {:binary, Colony.Protocol.encode_move(x, row * step, 0.0)})
     end
 
     Process.sleep(150)
-    14 * 60 + 30
+    14 * 60 + col
   end
 
   test "the snapshot is binary and has the number of the player", %{snapshot: snapshot} do
-    assert <<_tick::32, 1, 1::16-little, 60::16-little, 96, _rest::binary>> = snapshot
+    rows = :sys.get_state(Colony.Server).world.grid.rows
+    assert <<_tick::32, 1, 1::16-little, 60::16-little, ^rows::16-little, _rest::binary>> = snapshot
   end
 
   test "a lock with an `at` value that is not text does not stop the channel", %{socket: socket} do

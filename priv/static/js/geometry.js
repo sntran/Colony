@@ -289,9 +289,9 @@ export const WATER_DEPTH = 0.3;
 const WALL_DEPTH = 1.1;
 
 // Columns and rows of land around the grid. The fog hides the end of this land.
-const LAND_COLUMNS = 20;
-const LAND_ROWS_BEFORE = 30;
-const LAND_ROWS_AFTER = 20;
+export const LAND_COLUMNS = 20;
+export const LAND_ROWS_BEFORE = 30;
+export const LAND_ROWS_AFTER = 20;
 
 // Four lands, one year. Land 0 and land 1 are spring, land 2 is summer, land 3 is autumn
 // and land 4 is winter. Each season has the colors of the grass (dark and light), of the
@@ -304,9 +304,15 @@ export const SEASONS = [
 ];
 
 // The season of a land: 0 spring, 1 summer, 2 autumn, 3 winter.
-export const seasonOf = (land) => Math.max(0, Math.min(3, land - 1));
+// The seasons repeat: land 1 is spring, land 2 summer, land 3 autumn, land 4 winter, land 5
+// spring again, and so on. Land 0 is spring.
+export const seasonOf = (land) => (land <= 1 ? 0 : (land - 1) % 4);
 
-export function terrainMesh(grid, seed) {
+// The ground of the rows from `rowFrom` to `rowTo` (not included). The page makes the world
+// in parts of some rows, and it draws only the parts near the camera. The first part also
+// has the hills before row 0, and the last part has the hills after the last row: give
+// `rowFrom` = -Infinity or `rowTo` = Infinity for them.
+export function terrainMesh(grid, seed, rowFrom = -Infinity, rowTo = Infinity) {
   const noise = noiseFrom(seed);
   const size = 1 / Math.sqrt(3);
   const zEnd = (grid.rows - 1) * ROW_STEP;
@@ -356,7 +362,9 @@ export function terrainMesh(grid, seed) {
     ][i];
   };
 
-  for (let row = -LAND_ROWS_BEFORE; row < grid.rows + LAND_ROWS_AFTER; row++) {
+  const first = Math.max(-LAND_ROWS_BEFORE, rowFrom);
+  const end = Math.min(grid.rows + LAND_ROWS_AFTER, rowTo);
+  for (let row = first; row < end; row++) {
     for (let col = -LAND_COLUMNS; col < grid.width + LAND_COLUMNS; col++) {
       const [river, land] = grid.zone(row, col);
       if (river !== 0) continue;

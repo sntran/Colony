@@ -110,7 +110,8 @@ export class World {
     this.foodNest = 0;
     // The river that the colony builds a bridge across now.
     this.stage = 1;
-    this.complete = false;
+    // This number changes each time the grid gets more rivers.
+    this.gridKey = 0;
     this.foodDirty = true;
     this.time = 0;
     // Things that occurred in the last messages. The page makes sounds and marks from
@@ -225,8 +226,7 @@ export class World {
             rivers.push({ start: view.getUint16(o, true), widths: new Uint8Array(buffer.slice(o + 2, o + 2 + width)) });
             o += 2 + width;
           }
-          this.grid = new Grid(width, rows, rivers);
-          if (this.scent.length !== this.grid.count) this.scent = new Uint8Array(this.grid.count);
+          this.setGrid(new Grid(width, rows, rivers));
           break;
         }
         case 2:
@@ -343,9 +343,8 @@ export class World {
           if (!snapshot && food > this.foodNest) this.news.food += food - this.foodNest;
           this.foodNest = food;
           this.stage = view.getUint16(o + 4, true);
-          this.complete = view.getUint8(o + 6) === 1;
           this.foodDirty = true;
-          o += 7 * count;
+          o += 6 * count;
           break;
         }
         case 12:
@@ -414,6 +413,21 @@ export class World {
           this.oldNests = nests;
           this.nestKey++;
           this.foodDirty = true;
+          break;
+        }
+        case 15: {
+          // The grid got more rivers at the north. The cells of the old grid do not change.
+          const rows = view.getUint16(o, true);
+          const from = view.getUint16(o + 2, true);
+          const added = view.getUint16(o + 4, true);
+          o += 6;
+          const width = this.grid.width;
+          const rivers = this.grid.rivers.slice(0, from - 1);
+          for (let k = 0; k < added; k++) {
+            rivers.push({ start: view.getUint16(o, true), widths: new Uint8Array(buffer.slice(o + 2, o + 2 + width)) });
+            o += 2 + width;
+          }
+          this.setGrid(new Grid(width, rows, rivers));
           break;
         }
         default:
@@ -504,6 +518,19 @@ export class World {
   // True if a free body can be on the cell.
   walkable(cell) {
     return this.grid.kind(cell) === LAND || this.locked.has(cell);
+  }
+
+  // A new grid, or the same grid with more rows. The scent of the cells stays.
+  setGrid(grid) {
+    const same = this.grid && this.grid.width === grid.width && this.grid.rows === grid.rows && this.grid.rivers.length === grid.rivers.length;
+    this.grid = grid;
+    if (this.scent.length !== grid.count) {
+      const scent = new Uint8Array(grid.count);
+      scent.set(this.scent.subarray(0, Math.min(this.scent.length, grid.count)));
+      this.scent = scent;
+    }
+    if (!same) this.gridKey++;
+    this.scentDirty = true;
   }
 
   // Takes the news: see `this.news`.

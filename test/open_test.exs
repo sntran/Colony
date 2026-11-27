@@ -106,7 +106,8 @@ defmodule Colony.OpenTest do
       {world, id} = World.join(world, "Tester")
       world = Sim.cross!(world, id, 1)
       assert World.complete?(world, 1)
-      assert map_size(world.open) == 0
+      # The open cells are in the next river only.
+      assert Enum.all?(Map.keys(world.open), &(Grid.river(world.grid, &1) == 2))
       assert length(World.bridge(world, 1)) == 5
 
       # A cell beside the bridge has support, but it is not open.

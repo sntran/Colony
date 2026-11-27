@@ -72,10 +72,14 @@ defmodule Colony.Store do
   @doc "The path of the save file from the game config."
   def path(cfg), do: Path.expand(Keyword.fetch!(cfg, :save_file))
 
-  @doc "Writes the term. The write goes to a second file first, thus a stop in the middle does not break the save file."
+  @doc """
+  Writes the term. The write goes to a second file first, thus a stop in the middle does not
+  break the save file. Each write has its own second file: two writes at one time do not
+  use the same file.
+  """
   def save(path, term) do
     File.mkdir_p!(Path.dirname(path))
-    temporary = path <> ".tmp"
+    temporary = "#{path}.#{System.unique_integer([:positive])}.tmp"
     File.write!(temporary, :erlang.term_to_binary(term, [:compressed]))
     File.rename!(temporary, path)
     :ok

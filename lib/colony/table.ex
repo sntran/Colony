@@ -18,8 +18,9 @@ defmodule Colony.Table do
   is `:best` or `{:random, seed}`. Returns `{bodies, crossed?}`.
   """
   def run(cfg, width, how) do
-    cfg = Keyword.merge(cfg, rivers: [{width, width}], endless: false, seed: 1)
-    grid = Grid.new(cfg, 1)
+    cfg = Keyword.merge(cfg, rivers: [{width, width}], seed: 1)
+    # One river is enough.
+    grid = Grid.new(cfg, 1, 1)
     rule = Support.rule(cfg)
     row = Grid.river_start(grid, 1)
     start = for col <- 24..36, do: Grid.cell(grid, row, col)

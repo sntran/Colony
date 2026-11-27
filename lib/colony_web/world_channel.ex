@@ -112,7 +112,7 @@ defmodule ColonyWeb.WorldChannel do
   # The players with their bodies and their food, for the story.
   def handle_in("story", _params, socket) do
     story = Server.story()
-    {:reply, {:ok, Map.take(story, [:start, :time, :complete, :crossings, :food, :names])}, socket}
+    {:reply, {:ok, Map.take(story, [:start, :time, :crossings, :food, :names])}, socket}
   end
 
   def handle_in("ping", _params, socket), do: {:reply, :ok, socket}
