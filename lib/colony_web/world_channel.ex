@@ -5,7 +5,11 @@ defmodule ColonyWeb.WorldChannel do
   Events to the client: "s" (all the state, binary), "t" (the changes of a tick, binary),
   "you" (a message for this player only), "records" (all the records of the bridges) and
   "record" (one record that is new or that changed).
-  Events from the client: "m" (move, binary), "lock", "body", "name", "story" and "ping".
+  Events from the client: "m" (move, binary), "lock", "body", "name", "me", "story" and
+  "ping".
+
+  The join has the name, and the secret number of the page as text: the server knows the
+  person by it.
 
   A message with wrong data gets the reply "error" or no reply. It does not stop the channel.
   """
@@ -31,7 +35,10 @@ defmodule ColonyWeb.WorldChannel do
     # If the world process stops, this channel stops also. The page then joins again and
     # gets the new world.
     Process.monitor(Server)
-    {:ok, id, snapshot} = Server.join(self(), clean_name(params["name"]), look?)
+
+    {:ok, id, snapshot} =
+      Server.join(self(), clean_name(params["name"]), look?, clean_secret(params["secret"]))
+
     push(socket, "s", {:binary, snapshot})
     push(socket, "records", %{records: Server.records()})
     {:noreply, assign(socket, :id, if(look?, do: nil, else: id))}
@@ -92,6 +99,16 @@ defmodule ColonyWeb.WorldChannel do
 
   def handle_in("name", _params, socket), do: {:reply, :error, socket}
 
+  # The numbers of the person of this player, for the panel of the name.
+  def handle_in("me", _params, %{assigns: %{id: id}} = socket) when id != nil do
+    case Server.numbers(id) do
+      nil -> {:reply, :error, socket}
+      numbers -> {:reply, {:ok, numbers}, socket}
+    end
+  end
+
+  def handle_in("me", _params, socket), do: {:reply, :error, socket}
+
   # The players with their bodies and their food, for the story.
   def handle_in("story", _params, socket) do
     story = Server.story()
@@ -114,4 +131,11 @@ defmodule ColonyWeb.WorldChannel do
   end
 
   defp clean_name(_), do: "Guest"
+
+  # A secret number is text of 16 to 64 letters and digits. Other values are not used.
+  defp clean_secret(secret) when is_binary(secret) do
+    if secret =~ ~r/^[A-Za-z0-9]{16,64}$/, do: secret
+  end
+
+  defp clean_secret(_), do: nil
 end

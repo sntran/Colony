@@ -13,19 +13,23 @@ defmodule Colony.Mirror do
   defstruct grid: nil,
             tick: 0,
             you: nil,
+            person: 0,
             decay_ticks: 10,
             rule: nil,
             rivers: [],
             start: 0,
             workers: %{},
             structure: %{},
-            open: MapSet.new(),
+            open: %{},
             locks: %{},
             scent: %{},
             food: nil,
             piles: %{},
+            nest: nil,
+            old_nests: [],
             players: %{},
-            names: %{}
+            names: %{},
+            people: %{}
 
   @doc "Starts from a snapshot."
   def new(grid, <<tick::32-little, rest::binary>>) do
@@ -54,10 +58,8 @@ defmodule Colony.Mirror do
     sections(mirror, rest)
   end
 
-  # The structure, the open cells and the piles are full lists: the old values go away.
-  defp start(mirror, 8), do: %{mirror | structure: %{}}
-  defp start(mirror, 9), do: %{mirror | open: MapSet.new()}
-  defp start(mirror, 13), do: %{mirror | piles: %{}}
+  # The open cells are a full list: the old values go away.
+  defp start(mirror, 9), do: %{mirror | open: %{}}
   defp start(mirror, _tag), do: mirror
 
   defp records(mirror, _tag, 0, rest), do: {mirror, rest}
@@ -70,19 +72,30 @@ defmodule Colony.Mirror do
   defp record(
          mirror,
          1,
-         <<width::16-little, _rows::8, _nest::16, _seed::32, you::16-little, _rate::8, _speed::8,
-           decay::16-little, start::32-little, bank::8, n::8, costs::binary-size(n), count::8,
-           rest::binary>>
+         <<width::16-little, _rows::16-little, _seed::32, you::16-little, person::16-little,
+           _rate::8, _speed::8, decay::16-little, start::32-little, bank::8, n::8,
+           costs::binary-size(n), count::16-little, rest::binary>>
        ) do
     rule = %{bank: bank, costs: :binary.bin_to_list(costs)}
 
     {rivers, rest} =
-      Enum.map_reduce(1..count, rest, fn _,
-                                         <<first::8, widths::binary-size(^width), rest::binary>> ->
+      Enum.map_reduce(1..count//1, rest, fn _,
+                                            <<first::16-little, widths::binary-size(^width),
+                                              rest::binary>> ->
         {%{start: first, widths: :binary.bin_to_list(widths)}, rest}
       end)
 
-    {%{mirror | you: you, decay_ticks: decay, rule: rule, rivers: rivers, start: start}, rest}
+    mirror = %{
+      mirror
+      | you: you,
+        person: person,
+        decay_ticks: decay,
+        rule: rule,
+        rivers: rivers,
+        start: start
+    }
+
+    {mirror, rest}
   end
 
   defp record(
@@ -93,22 +106,28 @@ defmodule Colony.Mirror do
     {%{mirror | names: Map.put(mirror.names, id, {name, flags == 1})}, rest}
   end
 
-  defp record(mirror, 3, <<id::16-little, cell::16-little, flags::8, rest::binary>>) do
-    {%{mirror | workers: Map.put(mirror.workers, id, {cell, flags &&& 1})}, rest}
+  defp record(mirror, 3, <<id::16-little, cell::32-little, flags::8, rest::binary>>) do
+    worker = %{
+      cell: cell,
+      carry: carry(flags),
+      kind: if((flags &&& 8) != 0, do: :carrier, else: :spare)
+    }
+
+    {%{mirror | workers: Map.put(mirror.workers, id, worker)}, rest}
   end
 
   defp record(mirror, 4, <<value::16-little, rest::binary>>) do
     id = value >>> 3
     direction = value &&& 7
-    {cell, carry} = Map.fetch!(mirror.workers, id)
+    worker = Map.fetch!(mirror.workers, id)
 
     to =
       Enum.find(
-        Grid.neighbors(mirror.grid, cell),
-        &(Grid.direction(mirror.grid, cell, &1) == direction)
+        Grid.neighbors(mirror.grid, worker.cell),
+        &(Grid.direction(mirror.grid, worker.cell, &1) == direction)
       )
 
-    {%{mirror | workers: Map.put(mirror.workers, id, {to, carry})}, rest}
+    {%{mirror | workers: Map.put(mirror.workers, id, %{worker | cell: to})}, rest}
   end
 
   defp record(mirror, 5, <<id::16-little, rest::binary>>) do
@@ -118,33 +137,43 @@ defmodule Colony.Mirror do
   defp record(
          mirror,
          6,
-         <<cell::16-little, kind::8, id::16-little, time::32-little, n::16-little, size::8,
-           name::binary-size(size), rest::binary>>
+         <<cell::32-little, kind::8, id::16-little, owner::16-little, time::32-little, n::32-little,
+           size::8, name::binary-size(size), rest::binary>>
        ) do
-    lock = %{kind: kind, id: id, time: time, n: n, name: name}
+    lock = %{kind: kind, id: id, owner: owner, time: time, n: n, name: name}
     {%{mirror | locks: Map.put(mirror.locks, cell, lock)}, rest}
   end
 
-  defp record(mirror, 8, <<cell::16-little, support::8, rest::binary>>) do
+  defp record(mirror, 7, <<person::16-little, size::8, name::binary-size(size), rest::binary>>) do
+    locks =
+      Map.new(mirror.locks, fn
+        {cell, %{owner: ^person, kind: 1} = lock} -> {cell, %{lock | name: name}}
+        entry -> entry
+      end)
+
+    {%{mirror | people: Map.put(mirror.people, person, name), locks: locks}, rest}
+  end
+
+  defp record(mirror, 8, <<cell::32-little, support::8, rest::binary>>) do
     {%{mirror | structure: Map.put(mirror.structure, cell, support)}, rest}
   end
 
-  defp record(mirror, 9, <<cell::16-little, rest::binary>>) do
-    {%{mirror | open: MapSet.put(mirror.open, cell)}, rest}
+  defp record(mirror, 9, <<cell::32-little, gain::8, rest::binary>>) do
+    {%{mirror | open: Map.put(mirror.open, cell, gain)}, rest}
   end
 
-  defp record(mirror, 10, <<cell::16-little, value::8, rest::binary>>) do
+  defp record(mirror, 10, <<cell::32-little, value::8, rest::binary>>) do
     {%{mirror | scent: Map.put(mirror.scent, cell, value)}, rest}
   end
 
-  defp record(mirror, 11, <<nest::32-little, stage::8, flags::8, rest::binary>>) do
+  defp record(mirror, 11, <<nest::32-little, stage::16-little, flags::8, rest::binary>>) do
     {%{mirror | food: %{nest: nest, stage: stage, complete: flags == 1}}, rest}
   end
 
   defp record(
          mirror,
          12,
-         <<id::16-little, x::16-little, z::16-little, heading::8, flags::8, rest::binary>>
+         <<id::16-little, x::16-little, z::32-little, heading::8, flags::8, rest::binary>>
        ) do
     player = %{x: x / 500 - 1, z: z / 500 - 1, heading: heading, carry: flags == 1}
     {%{mirror | players: Map.put(mirror.players, id, player)}, rest}
@@ -153,9 +182,27 @@ defmodule Colony.Mirror do
   defp record(
          mirror,
          13,
-         <<id::8, cell::16-little, units::16-little, size::16-little, flags::8, rest::binary>>
+         <<id::16-little, cell::32-little, units::16-little, size::16-little, least::16-little,
+           flags::8, rest::binary>>
        ) do
-    pile = %{cell: cell, units: units, size: size, far: flags == 1}
+    pile = %{cell: cell, units: units, size: size, least: least, far: flags == 1}
     {%{mirror | piles: Map.put(mirror.piles, id, pile)}, rest}
+  end
+
+  defp record(mirror, 14, <<nest::32-little, count::16-little, rest::binary>>) do
+    {old, rest} =
+      Enum.map_reduce(1..count//1, rest, fn _, <<cell::32-little, land::16-little, rest::binary>> ->
+        {%{cell: cell, land: land}, rest}
+      end)
+
+    {%{mirror | nest: nest, old_nests: old}, rest}
+  end
+
+  defp carry(flags) do
+    cond do
+      (flags &&& 1) != 0 -> :food
+      (flags &&& 4) != 0 -> :egg
+      true -> nil
+    end
   end
 end

@@ -87,7 +87,7 @@ export async function open(browser, query = "", wait = true, before = null) {
       const { world, player } = window.colony;
       return {
         x: world.me.x, z: world.me.z, carry: world.me.carry, name: world.me.name,
-        spare: world.freeWorkers, food: world.foodNest, stage: world.stage, complete: world.complete,
+        spare: world.spare, carriers: world.carriers, food: world.foodNest, button: window.colony.button(), stage: world.stage, complete: world.complete,
         locks: player.locks, noLocks: player.noLocks, locked: world.locked.size, corrections: player.corrections,
         // The land that the body is on, or -1 on a bridge.
         land: ((cell) => (cell >= 0 && world.grid.kind(cell) === 0 ? world.grid.land(cell) : -1))(world.grid.cellAt(world.me.x, world.me.z)),
@@ -119,9 +119,12 @@ export async function open(browser, query = "", wait = true, before = null) {
 }
 
 // Plays with the script of the new player until `done(state, seconds)` is true or the
-// time is at its end. `each(state, seconds)` gets each state.
-export async function playNew(session, { limit, done, each }) {
-  const script = new NewPlayer();
+// time is at its end. `each(state, seconds)` gets each state. With `slow`, the script is
+// the slow script. The result has the longest time with no guide and no bright button.
+export async function playNew(session, { limit, done, each, slow = false, seed = 1 }) {
+  const script = new NewPlayer({ slow, seed });
+  let idleFrom = null;
+  session.longestIdle = 0;
   const start = Date.now();
   let last = null;
   for (;;) {
@@ -135,6 +138,14 @@ export async function playNew(session, { limit, done, each }) {
     }
     const moved = last === null || Math.hypot(state.x - last.x, state.z - last.z) > 0.03;
     last = state;
+    // A time with no guide and no bright button: no mark on the screen, no arrow.
+    const view = state.view;
+    if (!view.lock && !view.mark && !view.arrow) {
+      if (idleFrom === null) idleFrom = seconds;
+      session.longestIdle = Math.max(session.longestIdle, seconds - idleFrom);
+    } else {
+      idleFrom = null;
+    }
     const action = script.step(state.view, moved, now);
     await session.stick(action.stick[0], action.stick[1]);
     if (action.tap) await session.tapLock();

@@ -2,26 +2,23 @@ defmodule Colony.Workers do
   @moduledoc """
   The rules of the workers.
 
-  A worker never locks. It carries food, and it is a spare body: at a lock, a player takes
-  the body of the nearest worker.
+  A worker never locks. The colony has two kinds of workers:
+
+  - **A carrier** carries food. A lock never uses a carrier. At each move a carrier obeys
+    the first rule that applies:
+    1. It carries an egg: go to the nest and put the egg there.
+    2. It carries food: go to the nest by the shortest way.
+    3. It goes for an egg: go to the old nest and take an egg.
+    4. A pile with food is there, and the carrier can walk to it: go to the nearest such
+       pile and take one unit.
+    5. Move at random near the nest.
+  - **A spare body** waits at the crossing place: a lock uses the nearest spare body. With
+    no open cell, a spare body moves at random near the nest.
 
   A worker is on one cell. It moves one cell at a time. The speed gives the ticks when a
-  worker moves. At each move the worker obeys the first rule that applies:
+  worker moves.
 
-  1. It carries food: go to the nest by the shortest way.
-  2. A pile with food is there, and the worker can walk to it: go to the nearest such pile
-     and take one unit.
-  3. A pile is there, and no body can walk to it: go to the crossing place and wait there.
-  4. Move at random near the nest.
-
-  If rules 2 and 3 apply at the same time, one worker of each three waits at the crossing
-  place. The other two carry food.
-
-  At a crossing, some of the workers that waited go to the new pile: see
-  `Colony.World`. And until the first food of a pile is at the nest, that pile calls 3
-  workers. Such a worker goes to that pile, not to the nearest pile.
-
-  The workers smell the food: no rule reads the scent. A worker with food puts scent, and
+  The workers smell the food: no rule reads the scent. A carrier with food puts scent, and
   the scent is a picture of the road.
   """
 
@@ -38,9 +35,8 @@ defmodule Colony.Workers do
   def step(%World{} = world) do
     tick = world.tick
     step = world.p.step
-    world = world |> call_to_piles() |> share_work()
 
-    # `waiting`: the number of workers that wait at each cell.
+    # `waiting`: the number of spare bodies that wait at each cell.
     waiting =
       Enum.reduce(world.workers, %{}, fn
         {_id, %{mode: :wait, cell: cell}}, acc -> Map.update(acc, cell, 1, &(&1 + 1))
@@ -55,128 +51,81 @@ defmodule Colony.Workers do
     world
   end
 
-  # Until the first food of a pile is at the nest, the pile calls workers: 3 workers go
-  # to that pile or carry food from it. They are the workers with no food that are
-  # nearest to it. Without this rule, the workers go to the nearest pile, and the first
-  # food of a far pile comes only when the nearer piles are empty.
-  @called 3
-  defp call_to_piles(world) do
-    Enum.reduce(world.piles, world, fn
-      {k, %{fed: false, crossed: crossed, units: units}}, world when crossed != nil and units > 0 ->
-        way = Map.fetch!(world.to_pile, k)
-
-        busy =
-          Enum.count(world.workers, fn {_id, worker} ->
-            worker.mode == {:fetch, k} or worker.carry == k
-          end)
-
-        if busy >= @called do
-          world
-        else
-          # A worker that waits at the crossing place is called only if no other worker
-          # is there: the workers that wait are the spare bodies of the builders.
-          free =
-            Enum.filter(world.workers, fn {_id, worker} ->
-              worker.carry == nil and worker.mode in [:idle, :food, :wait] and
-                is_map_key(way, worker.cell)
-            end)
-
-          {waiting, others} = Enum.split_with(free, fn {_id, worker} -> worker.mode == :wait end)
-          nearest = &Enum.sort_by(&1, fn {id, worker} -> {Map.fetch!(way, worker.cell), id} end)
-
-          (nearest.(others) ++ nearest.(waiting))
-          |> Enum.take(@called - busy)
-          |> Enum.reduce(world, fn {id, worker}, world ->
-            put(world, id, %{worker | mode: {:fetch, k}})
-          end)
-        end
-
-      _, world ->
-        world
-    end)
-  end
-
-  # While the workers can carry food, one worker of each `wait_part` waits at the crossing
-  # place. When a worker must start to wait, it is the worker with no food that is
-  # nearest to the crossing place. When a worker must stop, it is the farthest.
-  defp share_work(%World{front: front} = world) when front != %{} do
-    count = Enum.count(world.workers, fn {_id, worker} -> worker.mode == :wait end)
-
-    wanted =
-      if Enum.any?(world.piles, fn {_id, pile} -> pile.units > 0 and pile.crossed != nil end),
-        do: ceil(map_size(world.workers) / world.p.wait_part),
-        else: map_size(world.workers)
-
-    steps = fn {_id, worker} -> Map.get(front, worker.cell, 1_000_000) end
-
-    changes =
-      cond do
-        count < wanted ->
-          world.workers
-          |> Enum.filter(fn {_id, worker} ->
-            worker.mode in [:idle, :food] and worker.carry == nil
-          end)
-          |> Enum.sort_by(&{steps.(&1), elem(&1, 0)})
-          |> Enum.take(wanted - count)
-          |> Enum.map(fn {id, worker} -> {id, %{worker | mode: :wait}} end)
-
-        count > wanted ->
-          world.workers
-          |> Enum.filter(fn {_id, worker} -> worker.mode == :wait end)
-          |> Enum.sort_by(&{-steps.(&1), elem(&1, 0)})
-          |> Enum.take(count - wanted)
-          |> Enum.map(fn {id, worker} -> {id, %{worker | mode: :food}} end)
-
-        true ->
-          []
-      end
-
-    %{world | workers: Enum.into(changes, world.workers)}
-  end
-
-  defp share_work(world), do: world
-
   defp moves_now?(id, tick, step) do
     phase = id * @golden
     phase = phase - Float.floor(phase)
     Float.floor(tick * step + phase) > Float.floor((tick - 1) * step + phase)
   end
 
-  defp decide(world, waiting, id, _worker) do
-    # `share_work/1` can change the worker in this tick. Read the worker again.
-    worker = Map.fetch!(world.workers, id)
-    pile = near_pile(world, worker.cell)
+  defp decide(world, waiting, id, %{kind: :spare} = worker) do
+    if world.front != %{} do
+      wait(world, waiting, id, worker)
+    else
+      waiting =
+        if worker.mode == :wait, do: Map.update(waiting, worker.cell, 0, &(&1 - 1)), else: waiting
 
-    cond do
-      worker.carry != nil ->
-        {carry(world, id, worker), waiting}
-
-      match?({:fetch, _}, worker.mode) ->
-        {fetch(world, id, worker), waiting}
-
-      world.front != %{} and (worker.mode == :wait or pile == nil) ->
-        wait(world, waiting, id, worker)
-
-      pile != nil ->
-        {food(world, id, %{worker | mode: :food}, pile), waiting}
-
-      true ->
-        {wander(world, id, %{worker | mode: :idle}), waiting}
+      {wander(world, id, %{worker | mode: :idle}), waiting}
     end
   end
 
-  # A worker that goes to a new pile after a crossing. If the pile has no food or no way,
-  # the worker has no work: the usual rules apply at its next move.
-  defp fetch(world, id, %{mode: {:fetch, pile}} = worker) do
-    steps = Map.get(Map.fetch!(world.to_pile, pile), worker.cell)
+  defp decide(world, waiting, id, worker) do
+    world =
+      cond do
+        worker.carry == :egg ->
+          bring_egg(world, id, worker)
 
-    if steps != nil and Map.fetch!(world.piles, pile).units > 0,
-      do: food(world, id, worker, {pile, steps}),
-      else: put(world, id, %{worker | mode: :idle})
+        worker.carry != nil ->
+          carry(world, id, worker)
+
+        worker.mode == {:egg, :fetch} ->
+          fetch_egg(world, id, worker)
+
+        (pile = near_pile(world, worker.cell)) != nil ->
+          food(world, id, %{worker | mode: :food}, pile)
+
+        true ->
+          wander(world, id, %{worker | mode: :idle})
+      end
+
+    {world, waiting}
   end
 
   # ---------------------------------------------------------------------------
-  # Rule 1: carry
+  # Eggs: after the nest moved, a carrier takes an egg from the old nest to the new nest.
+
+  defp fetch_egg(world, id, worker) do
+    case Map.get(world.to_old_nest, worker.cell) do
+      nil ->
+        put(world, id, %{worker | mode: :idle})
+
+      steps when steps <= 1 ->
+        worker = %{worker | carry: :egg, mode: {:egg, :bring}}
+
+        world
+        |> put(id, worker)
+        |> World.event(:worker_set, {id, worker.cell, World.flags(worker)})
+
+      steps ->
+        move(world, id, worker, nearer(world, world.to_old_nest, worker.cell, steps))
+    end
+  end
+
+  defp bring_egg(world, id, worker) do
+    case Map.get(world.walk, worker.cell) do
+      steps when steps != nil and steps > 1 ->
+        move(world, id, worker, nearer(world, world.walk, worker.cell, steps))
+
+      _ ->
+        worker = %{worker | carry: nil, mode: :idle}
+
+        world
+        |> put(id, worker)
+        |> World.event(:worker_set, {id, worker.cell, World.flags(worker)})
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Carry food to the nest
 
   defp carry(world, id, worker) do
     case Map.get(world.walk, worker.cell) do
@@ -185,10 +134,13 @@ defmodule Colony.Workers do
         world
 
       distance when distance <= 1 ->
+        pile = worker.carry
+        worker = %{worker | carry: nil, mode: :idle}
+
         world
-        |> put(id, %{worker | carry: nil, mode: :idle})
-        |> World.event(:worker_set, {id, worker.cell, 0})
-        |> World.add_nest_food(worker.carry, 1)
+        |> put(id, worker)
+        |> World.event(:worker_set, {id, worker.cell, World.flags(worker)})
+        |> World.add_nest_food(pile, 1)
 
       distance ->
         to = nearer(world, world.walk, worker.cell, distance)
@@ -200,14 +152,14 @@ defmodule Colony.Workers do
   end
 
   # ---------------------------------------------------------------------------
-  # Rule 2: food
+  # Food
 
-  # The nearest pile with food that the worker can walk to: `{pile id, steps}` or nil.
+  # The nearest pile with food that the carrier can walk to: `{pile id, steps}` or nil.
   defp near_pile(world, cell) do
-    Enum.reduce(world.piles, nil, fn {id, pile}, best ->
-      with true <- pile.units > 0,
-           steps when steps != nil <- Map.get(Map.fetch!(world.to_pile, id), cell),
-           true <- best == nil or steps < elem(best, 1) do
+    Enum.reduce(world.to_pile, nil, fn {id, way}, best ->
+      with steps when steps != nil <- Map.get(way, cell),
+           true <- best == nil or steps < elem(best, 1),
+           true <- Map.fetch!(world.piles, id).units > 0 do
         {id, steps}
       else
         _ -> best
@@ -219,10 +171,11 @@ defmodule Colony.Workers do
   defp food(world, id, worker, {pile, steps}) do
     if steps <= 1 do
       {world, 1} = World.take_food(world, pile, 1)
+      worker = %{worker | carry: pile, mode: :food}
 
       world
-      |> put(id, %{worker | carry: pile, mode: :food})
-      |> World.event(:worker_set, {id, worker.cell, 1})
+      |> put(id, worker)
+      |> World.event(:worker_set, {id, worker.cell, World.flags(worker)})
       |> World.add_scent(worker.cell, world.p.scent_carry)
     else
       move(world, id, worker, nearer(world, Map.fetch!(world.to_pile, pile), worker.cell, steps))
@@ -236,20 +189,26 @@ defmodule Colony.Workers do
   end
 
   # ---------------------------------------------------------------------------
-  # Rule 3: wait at the crossing place
+  # Wait at the crossing place
 
-  # A worker goes as near to the crossing place as possible. One worker waits on each
-  # cell. Thus the workers make a line on the bridge and a crowd behind it.
+  # A spare body goes as near to the crossing place as possible. One spare body waits on
+  # each cell. Thus the spare bodies make a line on the bridge and a crowd behind it.
   defp wait(world, waiting, id, worker) do
     cell = worker.cell
-    # A worker that no pile calls starts to wait here.
     waiting = if worker.mode == :wait, do: waiting, else: Map.update(waiting, cell, 1, &(&1 + 1))
     worker = %{worker | mode: :wait}
     world = put(world, id, worker)
 
     case Map.get(world.front, cell) do
       nil ->
-        {world, waiting}
+        # Far from the crossing place: go to the nest first. The nest is near the bridge.
+        case Map.get(world.walk, cell) do
+          steps when steps != nil and steps > 0 ->
+            shift(world, waiting, id, worker, nearer(world, world.walk, cell, steps))
+
+          _ ->
+            {world, waiting}
+        end
 
       steps ->
         free = fn to -> Map.get(waiting, to, 0) == 0 end
@@ -258,12 +217,27 @@ defmodule Colony.Workers do
         beside = Enum.filter(around, &(Map.get(world.front, &1) == steps and free.(&1)))
         {chance, world} = random(world)
 
+        # A free cell beside that has a free cell in front of it: the crowd spreads along
+        # the crossing place.
+        spread =
+          Enum.filter(beside, fn to ->
+            steps > 0 and
+              Enum.any?(
+                Grid.neighbors(world.grid, to),
+                &(Map.get(world.front, &1) == steps - 1 and free.(&1))
+              )
+          end)
+
         cond do
           ahead != nil ->
             shift(world, waiting, id, worker, ahead)
 
-          # The cell has a second worker, or the worker moves a little: go to a free cell
-          # that is not farther.
+          spread != [] ->
+            {world, to} = pick(world, spread)
+            shift(world, waiting, id, worker, to)
+
+          # The cell has a second spare body, or the spare body moves a little: go to a
+          # free cell that is not farther.
           beside != [] and (Map.get(waiting, cell, 0) > 1 or chance < @shift_chance) ->
             {world, to} = pick(world, beside)
             shift(world, waiting, id, worker, to)
@@ -277,40 +251,42 @@ defmodule Colony.Workers do
   defp shift(world, waiting, id, worker, to) do
     waiting =
       waiting
-      |> Map.update!(worker.cell, &(&1 - 1))
+      |> Map.update(worker.cell, 0, &(&1 - 1))
       |> Map.update(to, 1, &(&1 + 1))
 
     {move(world, id, worker, to), waiting}
   end
 
   # ---------------------------------------------------------------------------
-  # Rule 4: move at random near the nest
+  # Move at random near the nest
 
   defp wander(world, id, worker) do
     grid = world.grid
     cell = worker.cell
+    nest = world.nest
+    land = Grid.land(grid, nest)
     world = put(world, id, worker)
 
-    if Grid.nest_distance(grid, cell) > world.p.leash or Grid.land(grid, cell) != 0 or
-         Grid.kind(grid, cell) == :gap do
-      case Map.get(world.walk, cell) do
-        nil -> world
-        0 -> world
-        steps -> move(world, id, worker, nearer(world, world.walk, cell, steps))
-      end
-    else
-      {rest, world} = random(world)
+    near? = fn to ->
+      Grid.kind(grid, to) == :land and Grid.land(grid, to) == land and
+        Grid.distance(grid, to, nest) <= world.p.leash
+    end
 
-      cells =
-        Enum.filter(Grid.neighbors(grid, cell), fn to ->
-          Grid.kind(grid, to) == :land and Grid.nest_distance(grid, to) <= world.p.leash
-        end)
+    if near?.(cell) do
+      {rest, world} = random(world)
+      cells = Enum.filter(Grid.neighbors(grid, cell), near?)
 
       if rest < @rest_chance or cells == [] do
         world
       else
         {world, to} = pick(world, cells)
         move(world, id, worker, to)
+      end
+    else
+      case Map.get(world.walk, cell) do
+        nil -> world
+        0 -> world
+        steps -> move(world, id, worker, nearer(world, world.walk, cell, steps))
       end
     end
   end

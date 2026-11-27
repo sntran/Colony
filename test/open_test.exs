@@ -3,22 +3,20 @@ defmodule Colony.OpenTest do
 
   use ExUnit.Case, async: true
 
-  alias Colony.{Grid, Sim, Support, World}
+  alias Colony.{Grid, Sim, Support, Table, World}
 
   @moduletag timeout: 300_000
 
-  # The table of the plan. A width of 15 rows is not in the plan: no river has it.
-  @widths [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18]
-  @best [5, 6, 7, 8, 10, 13, 16, 19, 22, 25, 31, 36, 41]
-  @plan_random [5, 6, 7, 8, 10, 14, 18, 22, 27, 30, 42, 47, 51]
+  # "Best" of the table of plan 0003, for the widths 5 to 14.
+  @best [5, 6, 7, 8, 10, 13, 16, 19, 22, 25]
 
   defp world(rows, changes \\ []),
-    do: World.new(Sim.straight(rows, Keyword.merge([workers: 60], changes)))
+    do: World.new(Sim.straight(rows, Keyword.merge([spare: 60], changes)))
 
   # The cells that are open after the locks into `cells`, in this order.
   defp open_after(world, cells) do
     locked = Map.new(cells, &{&1, true})
-    start = Enum.sort(world.open)
+    start = Sim.open(world)
     Enum.sort(Support.open(world.grid, world.rule, locked, 1, start))
   end
 
@@ -27,7 +25,7 @@ defmodule Colony.OpenTest do
       world = world(6)
       col = world.piles[1].col
 
-      assert Enum.sort(world.open) ==
+      assert Sim.open(world) ==
                for(c <- (col - 6)..(col + 6), do: Sim.river_cell(world, 1, c))
     end
 
@@ -79,7 +77,7 @@ defmodule Colony.OpenTest do
       :rand.seed(:exsss, 3)
 
       Enum.reduce_while(1..80, %{}, fn _, locked ->
-        case Support.open(grid, rule, locked, 1, Enum.sort(world.open)) do
+        case Support.open(grid, rule, locked, 1, Sim.open(world)) do
           [] ->
             {:halt, locked}
 
@@ -108,7 +106,7 @@ defmodule Colony.OpenTest do
       {world, id} = World.join(world, "Tester")
       world = Sim.cross!(world, id, 1)
       assert World.complete?(world, 1)
-      assert MapSet.size(world.open) == 0
+      assert map_size(world.open) == 0
       assert length(World.bridge(world, 1)) == 5
 
       # A cell beside the bridge has support, but it is not open.
@@ -119,58 +117,12 @@ defmodule Colony.OpenTest do
     end
   end
 
-  describe "the table of the plan" do
-    # Builds a bridge on a river with one width. `pick` takes one of the open cells.
-    defp build(world, pick) do
-      grid = world.grid
-      rule = world.rule
-      start = Enum.sort(world.open)
-
-      locked =
-        Enum.reduce_while(1..400, %{}, fn _, locked ->
-          case Support.open(grid, rule, locked, 1, start) do
-            [] -> {:halt, locked}
-            open -> {:cont, Map.put(locked, pick.(locked, Enum.sort(open)), true)}
-          end
-        end)
-
-      # No run stops before the far land.
-      assert Enum.any?(Map.keys(locked), &Grid.touches_land?(grid, &1, 1))
-      map_size(locked)
-    end
-
-    # "Best" takes the open cell with the largest gain: the cell that gives the highest
-    # support of the top row.
-    defp best(world) do
-      grid = world.grid
-
-      build(world, fn locked, open ->
-        Enum.max_by(open, fn cell ->
-          next = Map.put(locked, cell, true)
-          top = next |> Map.keys() |> Enum.map(&Grid.row(grid, &1)) |> Enum.max()
-          Support.top_support(grid, Support.calculate(grid, world.rule, next), top)
-        end)
-      end)
-    end
-
-    # "Random" takes a random open cell: a player who taps each time the button is bright.
-    defp random(world, seed) do
-      :rand.seed(:exsss, seed)
-      build(world, fn _locked, open -> Enum.random(open) end)
-    end
-
-    test "the number of bodies for each width of a river" do
-      rows =
-        @widths
-        |> Task.async_stream(
-          fn width ->
-            world = world(width)
-            runs = for seed <- 1..25, do: random(world, seed)
-            {width, best(world), Enum.min(runs), Enum.max(runs)}
-          end,
-          timeout: :infinity
-        )
-        |> Enum.map(fn {:ok, row} -> row end)
+  describe "the table of the open cells" do
+    test "for each width from 5 to 27, no run stops before the far land, and Best is the table of the config" do
+      cfg = Sim.cfg()
+      rows = Table.table(cfg, Enum.to_list(5..27), 25)
+      best = Keyword.fetch!(cfg, :bridge_best)
+      random = Keyword.fetch!(cfg, :bridge_random)
 
       line = fn name, values ->
         "  #{String.pad_trailing(name, 28)}" <>
@@ -181,25 +133,97 @@ defmodule Colony.OpenTest do
         "\n" <>
           Enum.join(
             [
-              line.("Width", @widths),
-              line.("Best", Enum.map(rows, &elem(&1, 1))),
-              line.("Random, lowest of 25 runs", Enum.map(rows, &elem(&1, 2))),
-              line.("Random, highest of 25 runs", Enum.map(rows, &elem(&1, 3))),
-              line.("Random of the plan", @plan_random)
+              line.("Width", Enum.map(rows, & &1.width)),
+              line.("Best", Enum.map(rows, & &1.best)),
+              line.("Random, highest of 25 runs", Enum.map(rows, & &1.high)),
+              line.("Random of the config (200)", Enum.map(rows, &random[&1.width]))
             ],
             "\n"
           )
       )
 
-      # "Best" is the row of the plan.
-      assert Enum.map(rows, &elem(&1, 1)) == @best
-
-      # No random run is better than "Best". The highest random run changes with the
-      # random numbers: it is near the row of the plan, not the same.
-      for {{_width, best, low, high}, plan} <- Enum.zip(rows, @plan_random) do
-        assert low >= best
-        assert high <= plan * 1.25
+      for row <- rows do
+        assert row.stuck == 0, "a run stopped at width #{row.width}"
+        assert row.best == best[row.width]
+        # No random run is better than Best. The 25 runs are the first 25 of the 200 runs
+        # of the config: their highest is not more than the highest of the config.
+        assert row.low >= row.best
+        assert row.high <= random[row.width]
       end
+
+      # The widths of the plan 0003 table did not change.
+      assert Enum.map(rows, & &1.best) |> Enum.take(10) == Enum.take(@best, 10)
+    end
+
+    @tag :slow
+    @tag timeout: :infinity
+    test "200 random runs give the highest Random of the config" do
+      cfg = Sim.cfg()
+      random = Keyword.fetch!(cfg, :bridge_random)
+
+      for row <- Table.table(cfg, Enum.to_list(5..27), 200) do
+        assert row.stuck == 0
+        assert row.high == random[row.width]
+      end
+    end
+  end
+
+  describe "the gain of an open cell" do
+    test "in the wider phase, the gain is how much the cell makes the highest support of the top row larger" do
+      world = world(20)
+      grid = world.grid
+      rule = world.rule
+      start = Sim.open(world)
+      :rand.seed(:exsss, 7)
+
+      # A random bridge. At each step of the wider phase, each gain is the increase of the
+      # highest support of the top row.
+      {_locked, different} =
+        Enum.reduce_while(1..200, {%{}, 0}, fn _, {locked, different} ->
+          case Support.open_gains(grid, rule, locked, 1, start) do
+            [] ->
+              {:halt, {locked, different}}
+
+            gains ->
+              wider? = locked != %{} and Enum.any?(gains, fn {_cell, gain} -> gain > 0 end)
+
+              different =
+                if wider? do
+                  top = locked |> Map.keys() |> Enum.map(&Grid.row(grid, &1)) |> Enum.max()
+                  before = Support.top_support(grid, Support.calculate(grid, rule, locked), top)
+
+                  for {cell, gain} <- gains do
+                    next = Map.put(locked, cell, true)
+
+                    assert gain ==
+                             Support.top_support(grid, Support.calculate(grid, rule, next), top) -
+                               before
+
+                    assert gain > 0
+                  end
+
+                  values = gains |> Enum.map(&elem(&1, 1)) |> Enum.uniq()
+                  if length(values) > 1, do: different + 1, else: different
+                else
+                  different
+                end
+
+              {cell, _gain} = Enum.random(gains)
+              {:cont, {Map.put(locked, cell, true), different}}
+          end
+        end)
+
+      # Some steps have cells with a larger gain and cells with a smaller gain: the page
+      # shows the first bright and the others weak.
+      assert different > 0
+    end
+
+    test "in the forward phase, each open cell has the gain 0" do
+      world = world(12)
+      col = world.piles[1].col
+      locked = %{Sim.river_cell(world, 1, col) => true}
+      gains = Support.open_gains(world.grid, world.rule, locked, 1, Sim.open(world))
+      assert gains != [] and Enum.all?(gains, fn {_cell, gain} -> gain == 0 end)
     end
   end
 end

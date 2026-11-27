@@ -178,11 +178,22 @@ defmodule Colony.Support do
      support of the top row larger.
   """
   def open(grid, rule, locked, k, start) do
+    grid |> open_gains(rule, locked, k, start) |> Enum.map(&elem(&1, 0))
+  end
+
+  @doc """
+  The open cells of river `k` with the gain of each: `[{cell, gain}]`.
+
+  In the "wider" phase, the gain is how much a body in the cell makes the highest support
+  of the top row larger, as an integer of the rule. In the other phases the gain is 0: each
+  open cell helps the same.
+  """
+  def open_gains(grid, rule, locked, k, start) do
     bridge = for {cell, _} <- locked, Grid.river(grid, cell) == k, do: cell
 
     cond do
       bridge == [] ->
-        start
+        Enum.map(start, &{&1, 0})
 
       Enum.any?(bridge, &Grid.touches_land?(grid, &1, k)) ->
         []
@@ -196,7 +207,7 @@ defmodule Colony.Support do
               next <- Grid.forward(grid, cell),
               can_lock?(grid, rule, locked, next),
               uniq: true,
-              do: next
+              do: {next, 0}
 
         if ahead == [], do: wider(grid, rule, locked, k, bridge, top), else: ahead
     end
@@ -214,10 +225,12 @@ defmodule Colony.Support do
           uniq: true,
           do: next
 
-    Enum.filter(cells, fn cell ->
-      supports = with_body(grid, rule, locked, cell)
-      Map.get(supports, cell, 0) > 0 and top_support(grid, supports, top) > before
-    end)
+    for cell <- cells,
+        supports = with_body(grid, rule, locked, cell),
+        Map.get(supports, cell, 0) > 0,
+        gain = top_support(grid, supports, top) - before,
+        gain > 0,
+        do: {cell, gain}
   end
 
   @doc "The highest support of the bodies of a row."

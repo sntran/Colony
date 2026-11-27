@@ -8,14 +8,17 @@ defmodule Colony.World do
   Each change that a client must know is added to `events`. `tick/2` returns the events of
   the step and removes them from the world.
 
-  The rules of plan 0003:
+  The rules of plan 0004:
 
   - The world has rivers, one after the other. The colony builds one bridge for each river.
   - Only a player or a helper locks, and only into an open cell. A worker never locks.
-  - A lock uses one spare body: the player takes the body of the nearest worker.
-  - A crossing is the moment when a bridge touches the next land. It makes a record, and
-    the next pile appears.
-  - The world is complete when the first food of the last pile gets to the nest.
+  - The colony has two kinds of workers. A carrier carries food. A spare body waits at the
+    crossing place. A lock uses one spare body, never a carrier.
+  - A player who carries food cannot lock.
+  - A crossing is the moment when a bridge touches the next land. It makes a record, the
+    nest moves to the foot of the new bridge, and the next pile appears.
+  - The food of pile `k` makes the spare bodies for the bridge across river `k + 1`.
+  - A person is the same person for always: the page gives a secret number at each join.
   """
 
   alias Colony.{Grid, Helpers, Support, Workers}
@@ -30,51 +33,69 @@ defmodule Colony.World do
             now: 0,
             # The time of the first tick of the world.
             start: nil,
-            # Workers: id => %{cell, carry, mode}. Each worker is a spare body. The mode is
-            # :idle, :food, :wait, or {:fetch, pile} for a worker that goes to a new pile.
+            # Workers: id => %{cell, kind, carry, mode}. `kind` is :carrier or :spare.
+            # `carry` is nil, the number of a pile, or :egg. The mode of a carrier is :idle,
+            # :food, {:egg, :fetch} or {:egg, :bring}. The mode of a spare body is :wait
+            # or :idle.
             workers: %{},
+            # The number of workers of each kind.
+            counts: %{carrier: 0, spare: 0},
             # Worker numbers that are free for a new worker.
             free_ids: [],
             # Worker numbers that are free from the next tick. A client gets "worker gone"
             # and "worker set" of one number in two different messages.
             freed_ids: [],
             next_worker: 0,
-            # Locked bodies: cell => %{name, helper, time, n, crossings}. `n` is the number
-            # of the lock in the story, from 1.
+            # Locked bodies: cell => %{name, helper, owner, time, n, crossings}. `owner` is
+            # the number of the person, or nil for a helper. `n` is the number of the lock
+            # in the story, from 1.
             locked: %{},
             # Support of the locked bodies: cell => support, as an integer.
             supports: %{},
             lock_count: 0,
             # Scent: cell => 1..100. It is a picture of the road. No rule reads it.
             scent: %{},
-            # The piles of food: id => %{id, cell, col, size, units, appeared, crossed}.
-            # Pile `k` is on land `k`.
+            # The piles of food: id => %{id, cell, col, size, least, units, appeared,
+            # crossed, fed}. Pile `k` is on land `k`.
             piles: %{},
-            # The river that the colony builds a bridge across now. After the last
-            # crossing, it is the number of rivers plus 1.
+            # The river that the colony builds a bridge across now. In a world with an end,
+            # after the last crossing, it is the number of rivers plus 1.
             stage: 1,
-            # The open cells of the river `stage`.
-            open: MapSet.new(),
+            # The open cells of the river `stage`: cell => gain.
+            open: %{},
             # The time of the first lock of each bridge: river => time.
             first_lock: %{},
+            # The cell of the nest. The nest moves at each crossing.
+            nest: nil,
+            # The nests before this one, the newest first: %{cell, land}.
+            old_nests: [],
             food_nest: 0,
-            # Units of food that count for the next new worker.
+            # Units of food that count for the next new spare body.
             food_credit: 0,
-            # The tick of the last worker that the nest made because the colony had few workers.
+            # The tick of the last spare body that the nest made because the colony had few.
             low_tick: 0,
             # Players and helpers: id => player.
             players: %{},
             next_player: 1,
+            # The persons: number => %{name, food, secret}. `secret` is the SHA-256 of the
+            # secret number of the page, or nil.
+            people: %{},
+            # The SHA-256 of a secret number => the number of its person.
+            secrets: %{},
+            next_person: 1,
+            # The food that each helper carried to the nest: name => units.
+            helper_food: %{},
+            # The food that each person or helper carried since the last crossing:
+            # {:person, number} or {:helper, name} => units.
+            period: %{},
             # The number of steps on foot from each cell to the nest.
             walk: %{},
-            # For each pile: the number of steps on foot from each cell to the pile.
+            # For each pile with food: the number of steps on foot from each cell to the pile.
             to_pile: %{},
             # The number of steps on foot from each cell to the crossing place.
             front: %{},
-            # The food that each player carried to the nest: {name, helper} => units.
-            # `food_by` has all the food. `period` has the food from the last crossing.
-            food_by: %{},
-            period: %{},
+            # While carriers carry eggs: the number of steps on foot to the old nest.
+            to_old_nest: %{},
             # The records of the bridges, the newest first.
             records: [],
             # The records that changed and that the clients do not have.
@@ -92,10 +113,16 @@ defmodule Colony.World do
     locks: [],
     scent: %{},
     names: [],
+    people: [],
     you: [],
     records: [],
-    structure: false,
-    food: false
+    # The locked bodies whose support changed.
+    structure: [],
+    # The piles that changed.
+    piles: [],
+    open: false,
+    food: false,
+    nest: false
   }
 
   # A player can keep this many cells of movement for later. It absorbs late messages.
@@ -116,7 +143,7 @@ defmodule Colony.World do
   def new(cfg, saved \\ nil) do
     rate = Keyword.fetch!(cfg, :tick_rate)
     seed = (saved && saved.seed) || Keyword.get(cfg, :seed) || :rand.uniform(0x7FFFFFFF)
-    grid = Grid.new(cfg, seed)
+    grid = Grid.new(cfg, seed, saved && saved.rivers)
 
     p = %{
       rate: rate,
@@ -124,20 +151,29 @@ defmodule Colony.World do
       leash: Keyword.fetch!(cfg, :leash),
       food_touch: Keyword.fetch!(cfg, :food_touch),
       nest_touch: Keyword.fetch!(cfg, :nest_touch),
+      nest_rows: Keyword.fetch!(cfg, :nest_rows),
       player_food: Keyword.fetch!(cfg, :player_food),
-      pile_units: Keyword.fetch!(cfg, :pile_units),
       pile_rows: Keyword.fetch!(cfg, :pile_rows_from_river),
       pile_first_columns: Keyword.fetch!(cfg, :pile_first_columns),
+      pile_shift_columns: Keyword.fetch!(cfg, :pile_shift_columns),
       pile_edge_columns: Keyword.fetch!(cfg, :pile_edge_columns),
       pile_loss: Keyword.fetch!(cfg, :pile_loss_seconds),
-      pile_least: Keyword.fetch!(cfg, :pile_least),
+      pile_factor: Keyword.fetch!(cfg, :pile_factor),
+      pile_least_factor: Keyword.fetch!(cfg, :pile_least_factor),
+      last_pile_units: Keyword.fetch!(cfg, :last_pile_units),
+      last_pile_least: Keyword.fetch!(cfg, :last_pile_least),
+      bridge_best: Keyword.fetch!(cfg, :bridge_best),
+      bridge_random: Keyword.fetch!(cfg, :bridge_random),
       start_columns: Keyword.fetch!(cfg, :start_columns),
-      wait_part: Keyword.fetch!(cfg, :wait_part),
       takeover_ticks: round(Keyword.fetch!(cfg, :takeover_seconds) * rate),
-      workers_max: Keyword.fetch!(cfg, :workers_max),
-      food_per_worker: Keyword.fetch!(cfg, :food_per_worker),
-      workers_low: Keyword.fetch!(cfg, :workers_low),
-      worker_ticks: Keyword.fetch!(cfg, :worker_seconds) * rate,
+      carriers: Keyword.fetch!(cfg, :carriers),
+      carriers_per_crossing: Keyword.fetch!(cfg, :carriers_per_crossing),
+      carriers_max: Keyword.fetch!(cfg, :carriers_max),
+      spare: Keyword.fetch!(cfg, :spare),
+      spare_max: Keyword.fetch!(cfg, :spare_max),
+      food_per_body: Keyword.fetch!(cfg, :food_per_body),
+      spare_low: Keyword.fetch!(cfg, :spare_low),
+      spare_ticks: Keyword.fetch!(cfg, :spare_seconds) * rate,
       helpers: Keyword.fetch!(cfg, :helpers),
       helper_lock_ticks: Keyword.fetch!(cfg, :helper_lock_seconds) * rate,
       scent_max: Keyword.fetch!(cfg, :scent_max),
@@ -152,12 +188,17 @@ defmodule Colony.World do
       rule: Support.rule(cfg),
       seed: seed,
       rng: :rand.seed_s(:exsss, seed),
+      nest: grid.nest,
       events: @empty_events
     }
 
+    counts =
+      (saved && Map.get(saved, :workers)) || %{carrier: p.carriers, spare: p.spare}
+
     world
     |> restore(saved)
-    |> place_workers((saved && Map.get(saved, :workers)) || Keyword.fetch!(cfg, :workers))
+    |> place_workers(:carrier, counts.carrier)
+    |> place_workers(:spare, counts.spare)
     |> refresh_structure()
     |> refresh_ways()
     |> set_helpers(p.helpers)
@@ -167,18 +208,19 @@ defmodule Colony.World do
   # Save and load
 
   @doc "The version of the save file. A file with a different version is not loaded."
-  def save_version, do: 3
+  def save_version, do: 5
 
   @doc "The part of the world that goes into the save file."
   def to_save(%__MODULE__{} = world) do
     %{
       version: save_version(),
       seed: world.seed,
+      rivers: Grid.river_count(world.grid),
       start: world.start,
       locked:
         world.locked
         |> Enum.map(fn {cell, body} ->
-          {cell, body.name, body.helper, body.time, body.n, body.crossings}
+          {cell, body.name, body.helper, body.owner, body.time, body.n, body.crossings}
         end)
         |> Enum.sort(),
       lock_count: world.lock_count,
@@ -186,26 +228,35 @@ defmodule Colony.World do
       piles: world.piles,
       stage: world.stage,
       first_lock: world.first_lock,
+      nest: world.nest,
+      old_nests: world.old_nests,
       food_nest: world.food_nest,
       food_credit: world.food_credit,
-      workers: map_size(world.workers),
-      food_by: world.food_by,
+      workers: world.counts,
+      people: world.people,
+      next_person: world.next_person,
+      helper_food: world.helper_food,
       period: world.period,
       records: world.records,
       complete: world.complete
     }
   end
 
-  defp restore(world, %{version: 3} = saved) do
+  defp restore(world, %{version: 5} = saved) do
     grid = world.grid
 
     # A saved cell is used only if it is a river cell of this grid. The config can change
     # between two runs.
     locked =
-      for {cell, name, helper, time, n, crossings} <- saved.locked,
+      for {cell, name, helper, owner, time, n, crossings} <- saved.locked,
           cell < grid.count and Grid.kind(grid, cell) == :gap,
           into: %{} do
-        {cell, %{name: name, helper: helper, time: time, n: n, crossings: crossings}}
+        {cell, %{name: name, helper: helper, owner: owner, time: time, n: n, crossings: crossings}}
+      end
+
+    secrets =
+      for {number, %{secret: secret}} <- saved.people, secret != nil, into: %{} do
+        {secret, number}
       end
 
     %{
@@ -217,9 +268,14 @@ defmodule Colony.World do
         piles: saved.piles,
         stage: saved.stage,
         first_lock: saved.first_lock,
+        nest: saved.nest,
+        old_nests: saved.old_nests,
         food_nest: saved.food_nest,
         food_credit: saved.food_credit,
-        food_by: saved.food_by,
+        people: saved.people,
+        secrets: secrets,
+        next_person: saved.next_person,
+        helper_food: saved.helper_food,
         period: saved.period,
         records: saved.records,
         complete: saved.complete
@@ -230,22 +286,18 @@ defmodule Colony.World do
   defp restore(world, _saved), do: add_pile(world, 1)
 
   # The workers start near the nest.
-  defp place_workers(world, count) do
-    grid = world.grid
-
+  defp place_workers(world, kind, count) do
     spots =
-      for cell <- 0..(grid.count - 1),
-          Grid.kind(grid, cell) == :land,
-          Grid.land(grid, cell) == 0,
-          Grid.nest_distance(grid, cell) <= 3,
-          do: cell
+      world.grid.count
+      |> then(&(0..(&1 - 1)))
+      |> Enum.filter(fn cell ->
+        Grid.kind(world.grid, cell) == :land and Grid.distance(world.grid, cell, world.nest) <= 3
+      end)
+      |> List.to_tuple()
 
-    spots = List.to_tuple(spots)
-
-    Enum.reduce(0..(count - 1)//1, %{world | next_worker: count}, fn id, world ->
+    Enum.reduce(1..count//1, world, fn _, world ->
       {n, rng} = :rand.uniform_s(tuple_size(spots), world.rng)
-      worker = %{cell: elem(spots, n - 1), carry: nil, mode: :idle}
-      %{world | rng: rng, workers: Map.put(world.workers, id, worker)}
+      add_worker(%{world | rng: rng}, kind, elem(spots, n - 1), false)
     end)
   end
 
@@ -254,20 +306,50 @@ defmodule Colony.World do
 
   @doc """
   Adds a player. The player gets a body at the nest. This body does not use a spare body.
+
+  `secret` is the secret number of the page, as text, or nil. A second join with the same
+  secret number is the same person: the name of that person changes to `name`.
+
   Returns `{world, id}`.
   """
-  def join(%__MODULE__{} = world, name), do: add_body(world, name, nil)
+  def join(%__MODULE__{} = world, name, secret \\ nil) do
+    {world, person} = person(world, name, secret)
+    add_body(world, name, nil, person)
+  end
 
-  defp add_body(world, name, helper) do
+  # The number of the person with this secret number, or a new person.
+  defp person(world, name, secret) do
+    hash = secret && :crypto.hash(:sha256, secret)
+
+    case hash && Map.get(world.secrets, hash) do
+      nil ->
+        number = world.next_person
+        entry = %{name: name, food: 0, secret: hash}
+
+        world = %{
+          world
+          | people: Map.put(world.people, number, entry),
+            secrets: if(hash, do: Map.put(world.secrets, hash, number), else: world.secrets),
+            next_person: number + 1
+        }
+
+        {world, number}
+
+      number ->
+        {rename_person(world, number, name), number}
+    end
+  end
+
+  defp add_body(world, name, helper, person) do
     id = free_player_id(world, world.next_player)
-    {x, z} = Grid.center(world.grid, world.grid.nest)
+    {x, z} = Grid.center(world.grid, world.nest)
 
     player = %{
       name: name,
       x: x,
       z: z,
       heading: 0.0,
-      cell: world.grid.nest,
+      cell: world.nest,
       budget: @budget_cap,
       # The food that the body carries: nil or %{pile, units}.
       carry: nil,
@@ -275,6 +357,10 @@ defmodule Colony.World do
       ready_tick: 0,
       # The worker whose body the player took at the last lock.
       took: nil,
+      # The last act of the player: nil, :lock or :carry. The guide uses it.
+      last: nil,
+      # The number of the person, or nil for a helper.
+      person: person,
       # nil for a person. For a helper: the state of its rules.
       helper: helper
     }
@@ -293,23 +379,64 @@ defmodule Colony.World do
   end
 
   @doc """
-  A player gets a new name. The bodies that the player locked before keep the old name.
+  A player gets a new name. The person keeps the bodies and the food: all the bodies of
+  the person, the records and the story get the new name.
   """
   def rename(%__MODULE__{} = world, id, name) do
     case world.players do
-      %{^id => %{helper: nil} = player} ->
-        world
-        |> put_player(id, %{player | name: name})
-        |> event(:names, {id, name, false})
-
-      _ ->
-        world
+      %{^id => %{helper: nil, person: person}} -> rename_person(world, person, name)
+      _ -> world
     end
+  end
+
+  defp rename_person(world, person, name) do
+    world = %{world | people: Map.update!(world.people, person, &%{&1 | name: name})}
+
+    players =
+      Map.new(world.players, fn
+        {id, %{person: ^person} = player} -> {id, %{player | name: name}}
+        entry -> entry
+      end)
+
+    locked =
+      Map.new(world.locked, fn
+        {cell, %{owner: ^person} = body} -> {cell, %{body | name: name}}
+        entry -> entry
+      end)
+
+    {records, dirty} =
+      Enum.map_reduce(world.records, world.records_dirty, fn record, dirty ->
+        if Enum.any?(record.names, &(&1.owner == person)) do
+          names =
+            for entry <- record.names do
+              if entry.owner == person, do: %{entry | name: name}, else: entry
+            end
+
+          {%{record | names: names}, Enum.uniq([record.id | dirty])}
+        else
+          {record, dirty}
+        end
+      end)
+
+    world = %{world | players: players, locked: locked, records: records, records_dirty: dirty}
+
+    world =
+      Enum.reduce(players, world, fn
+        {id, %{person: ^person}}, world -> event(world, :names, {id, name, false})
+        _, world -> world
+      end)
+
+    event(world, :people, {person, name})
   end
 
   @doc "Removes a player. The locked bodies of the player stay."
   def leave(%__MODULE__{} = world, id) do
     %{world | players: Map.delete(world.players, id)}
+  end
+
+  @doc "The number of persons in the world: players that are not helpers."
+  def persons(%__MODULE__{} = world) do
+    Enum.count(world.players, fn {_id, player} -> player.helper == nil end)
   end
 
   @doc """
@@ -378,8 +505,9 @@ defmodule Colony.World do
   @doc """
   A player or a helper locks the body into a cell.
 
-  A lock is possible only into an open cell that touches the cell of the body, and only
-  if the colony has a spare body. The player then takes the body of the nearest worker.
+  A lock is possible only into an open cell that touches the cell of the body, only if the
+  colony has a spare body, and only if the body carries no food. The player then takes
+  the body of the nearest spare body.
 
   Returns `{:ok, world}` or `{{:error, reason}, world}`.
   """
@@ -388,13 +516,15 @@ defmodule Colony.World do
          true <- world.tick >= player.ready_tick,
          true <- is_integer(cell) and cell >= 0 and cell < world.grid.count,
          true <- cell in Grid.neighbors(world.grid, player.cell),
-         true <- MapSet.member?(world.open, cell),
-         true <- map_size(world.workers) > 0 do
+         true <- is_map_key(world.open, cell),
+         true <- player.carry == nil,
+         true <- world.counts.spare > 0 do
       river = world.stage
 
       body = %{
         name: player.name,
         helper: player.helper != nil,
+        owner: player.person,
         time: world.now,
         n: world.lock_count + 1,
         crossings: 0
@@ -415,14 +545,16 @@ defmodule Colony.World do
   end
 
   defp put_lock(world, cell, body, id) do
-    locked = Map.put(world.locked, cell, body)
     river = Grid.river(world.grid, cell)
+    # A lock changes the supports of its bridge only.
+    group = Support.with_body(world.grid, world.rule, world.locked, cell)
+    locked = Map.put(world.locked, cell, body)
 
     world = %{
       world
       | locked: locked,
         lock_count: body.n,
-        supports: Support.calculate(world.grid, world.rule, locked),
+        supports: Map.merge(world.supports, group),
         first_lock: Map.put_new(world.first_lock, river, world.now)
     }
 
@@ -433,18 +565,19 @@ defmodule Colony.World do
         to_pile: Map.new(world.to_pile, fn {pile, way} -> {pile, add_to_way(world, way, cell)} end)
     }
     |> event(:locks, {cell, body, id})
-    |> flag(:structure)
+    |> changed_supports(Map.keys(group))
   end
 
-  # The player gets the body of the worker that is nearest to the locked body by steps on
-  # foot. A worker with no food is used first. The food that the old body carried is lost.
+  defp changed_supports(world, cells) do
+    %{world | events: %{world.events | structure: cells ++ world.events.structure}}
+  end
+
+  # The player gets the body of the spare body that is nearest to the locked body by
+  # steps on foot. A carrier is never used.
   defp take_body(world, id, player, cell) do
     {worker_id, at} =
-      nearest_worker(world, cell, &(&1.carry == nil)) ||
-        nearest_worker(world, cell, fn _ -> true end) ||
-        any_worker(world)
+      nearest_worker(world, cell, &(&1.kind == :spare)) || any_spare(world)
 
-    worker = Map.fetch!(world.workers, worker_id)
     {x, z} = Grid.center(world.grid, at)
 
     player = %{
@@ -455,16 +588,11 @@ defmodule Colony.World do
         budget: @budget_cap,
         ready_tick: world.tick + world.p.takeover_ticks,
         took: worker_id,
-        carry: worker.carry && %{pile: worker.carry, units: 1}
+        last: :lock
     }
 
-    %{
-      world
-      | players: Map.put(world.players, id, player),
-        workers: Map.delete(world.workers, worker_id),
-        freed_ids: [worker_id | world.freed_ids]
-    }
-    |> event(:worker_gone, worker_id)
+    %{world | players: Map.put(world.players, id, player)}
+    |> remove_worker(worker_id)
   end
 
   defp nearest_worker(world, cell, use?) do
@@ -500,9 +628,9 @@ defmodule Colony.World do
     end
   end
 
-  # A worker that no way on foot gets to. This does not occur in a game that runs.
-  defp any_worker(world) do
-    {id, worker} = Enum.min(world.workers)
+  # A spare body that no way on foot gets to. This does not occur in a game that runs.
+  defp any_spare(world) do
+    {id, worker} = world.workers |> Enum.filter(fn {_id, w} -> w.kind == :spare end) |> Enum.min()
     {id, worker.cell}
   end
 
@@ -526,7 +654,7 @@ defmodule Colony.World do
       count < wanted ->
         used = MapSet.new(now, &elem(&1, 0))
         n = Enum.find(1..(count + 1), &(not MapSet.member?(used, &1)))
-        {world, _id} = add_body(world, "Helper #{n}", Helpers.new(n))
+        {world, _id} = add_body(world, "Helper #{n}", Helpers.new(n), nil)
         set_helpers(world, wanted)
 
       count > wanted ->
@@ -547,12 +675,15 @@ defmodule Colony.World do
   end
 
   @doc "True if the cell is open: a lock there is possible and helps."
-  def open?(world, cell), do: MapSet.member?(world.open, cell)
+  def open?(world, cell), do: is_map_key(world.open, cell)
 
-  @doc "The number of spare bodies. Each worker is a spare body."
-  def spare(world), do: map_size(world.workers)
+  @doc "The number of spare bodies."
+  def spare(world), do: world.counts.spare
 
-  @doc "The number of rivers."
+  @doc "The number of carriers."
+  def carriers(world), do: world.counts.carrier
+
+  @doc "The number of rivers of the grid."
   def rivers(world), do: Grid.river_count(world.grid)
 
   @doc "The scent of a cell."
@@ -574,9 +705,40 @@ defmodule Colony.World do
     end
   end
 
+  @doc "The piles with food that a body at the nest can walk to."
+  def food_piles(world) do
+    for {id, pile} <- world.piles,
+        pile.units > 0,
+        way = Map.get(world.to_pile, id),
+        way != nil and is_map_key(way, world.nest),
+        do: pile
+  end
+
+  @doc "The name of a person or of a helper: {:person, number} or {:helper, name}."
+  def who(%{helper: nil, person: person}), do: {:person, person}
+  def who(%{name: name}), do: {:helper, name}
+
   @doc """
-  The story: all the locks in the order of their times, and the players with their bodies
-  and their food.
+  The numbers of a person: the locked bodies, the food that the person carried to the
+  nest, and the number of times that a worker or a player walked on a body of the person.
+  """
+  def person_numbers(%__MODULE__{} = world, person) do
+    {bodies, walks} =
+      Enum.reduce(world.locked, {0, 0}, fn
+        {_cell, %{owner: ^person, crossings: crossings}}, {bodies, walks} ->
+          {bodies + 1, walks + crossings}
+
+        _, acc ->
+          acc
+      end)
+
+    entry = Map.get(world.people, person, %{name: "", food: 0})
+    %{person: person, name: entry.name, bodies: bodies, food: entry.food, walks: walks}
+  end
+
+  @doc """
+  The story: all the locks in the order of their times, and the players with their bodies,
+  their food and the walks on their bodies.
   """
   def story(%__MODULE__{} = world) do
     locks =
@@ -589,22 +751,33 @@ defmodule Colony.World do
           river: Grid.river(world.grid, cell),
           name: body.name,
           helper: body.helper,
+          owner: body.owner,
           time: body.time
         }
       end)
 
-    bodies = Enum.frequencies_by(locks, &{&1.name, &1.helper})
+    counts =
+      Enum.reduce(world.locked, %{}, fn {_cell, body}, acc ->
+        key = if body.helper, do: {:helper, body.name}, else: {:person, body.owner}
+        Map.update(acc, key, {1, body.crossings}, fn {n, w} -> {n + 1, w + body.crossings} end)
+      end)
+
+    people =
+      for {number, entry} <- world.people, into: %{} do
+        {{:person, number}, %{name: entry.name, helper: false, owner: number, food: entry.food}}
+      end
+
+    helpers =
+      for {name, food} <- world.helper_food, into: %{} do
+        {{:helper, name}, %{name: name, helper: true, owner: nil, food: food}}
+      end
 
     names =
-      for key <- Enum.uniq(Map.keys(bodies) ++ Map.keys(world.food_by)) do
-        {name, helper} = key
-
-        %{
-          name: name,
-          helper: helper,
-          bodies: Map.get(bodies, key, 0),
-          food: Map.get(world.food_by, key, 0)
-        }
+      for key <- Enum.uniq(Map.keys(counts) ++ Map.keys(people) ++ Map.keys(helpers)),
+          entry = Map.get(people, key) || Map.get(helpers, key) || helper_entry(key),
+          {bodies, walks} = Map.get(counts, key, {0, 0}),
+          bodies > 0 or entry.food > 0 do
+        Map.merge(entry, %{bodies: bodies, walks: walks})
       end
       |> Enum.sort_by(&{-&1.bodies, -&1.food, &1.name})
 
@@ -619,6 +792,9 @@ defmodule Colony.World do
       locks: locks
     }
   end
+
+  defp helper_entry({:helper, name}), do: %{name: name, helper: true, owner: nil, food: 0}
+  defp helper_entry(_key), do: nil
 
   # ---------------------------------------------------------------------------
   # Changes that the worker rules and the helper rules also use
@@ -669,32 +845,47 @@ defmodule Colony.World do
   def take_food(world, pile_id, wanted) do
     pile = Map.fetch!(world.piles, pile_id)
     units = min(wanted, pile.units)
-    world = %{world | piles: Map.put(world.piles, pile_id, %{pile | units: pile.units - units})}
-    {flag(world, :food), units}
+    pile = %{pile | units: pile.units - units}
+    world = %{world | piles: Map.put(world.piles, pile_id, pile)}
+
+    # A pile with no food needs no map of the way to it.
+    world =
+      if pile.units == 0, do: %{world | to_pile: Map.delete(world.to_pile, pile_id)}, else: world
+
+    {event(world, :piles, pile_id), units}
   end
 
   @doc false
-  # Units of food from the pile `pile_id` get to the nest. `by` is `{name, helper}` for the
-  # food that a player carried, or nil for a worker.
+  # Units of food from the pile `pile_id` get to the nest. `by` is the player that carried
+  # them, or nil for a carrier.
   def add_nest_food(world, pile_id, units, by \\ nil) do
     world = flag(%{world | food_nest: world.food_nest + units}, :food)
-    world = make_workers(%{world | food_credit: world.food_credit + units})
+    world = make_spare(%{world | food_credit: world.food_credit + units})
     world = %{world | piles: Map.update!(world.piles, pile_id, &%{&1 | fed: true})}
 
     world =
-      if by == nil do
-        world
-      else
-        %{
+      case by do
+        nil ->
           world
-          | food_by: Map.update(world.food_by, by, units, &(&1 + units)),
-            period: Map.update(world.period, by, units, &(&1 + units))
-        }
-        |> count_last_record(by, units)
+
+        player ->
+          key = who(player)
+
+          world =
+            case key do
+              {:person, number} ->
+                %{world | people: Map.update!(world.people, number, &%{&1 | food: &1.food + units})}
+
+              {:helper, name} ->
+                %{world | helper_food: Map.update(world.helper_food, name, units, &(&1 + units))}
+            end
+
+          %{world | period: Map.update(world.period, key, units, &(&1 + units))}
+          |> count_last_record(player, key, units)
       end
 
-    # The first food of the last pile makes the world complete.
-    if world.complete == nil and pile_id == rivers(world) do
+    # In a world with an end, the first food of the last pile makes the world complete.
+    if world.complete == nil and not Grid.endless?(world.cfg) and pile_id == rivers(world) do
       flag(%{world | complete: world.now}, :food)
     else
       world
@@ -705,45 +896,73 @@ defmodule Colony.World do
   def put_player(world, id, player), do: %{world | players: Map.put(world.players, id, player)}
 
   # ---------------------------------------------------------------------------
-  # Workers of the nest
+  # Workers
 
-  # The nest makes one worker for each `food_per_worker` units of food.
-  defp make_workers(world) do
-    if world.food_credit >= world.p.food_per_worker and
-         map_size(world.workers) < world.p.workers_max do
-      make_workers(make_worker(%{world | food_credit: world.food_credit - world.p.food_per_worker}))
-    else
-      %{world | food_credit: min(world.food_credit, world.p.food_per_worker)}
-    end
-  end
+  # Adds a worker of a kind on a cell. `jump` tells the clients that the worker starts
+  # at a new position.
+  defp add_worker(world, kind, cell, jump \\ true) do
+    {id, world} =
+      case world.free_ids do
+        [id | rest] -> {id, %{world | free_ids: rest}}
+        [] -> {world.next_worker, %{world | next_worker: world.next_worker + 1}}
+      end
 
-  # The nest makes a new worker, if the colony has room.
-  defp make_worker(world) do
-    if map_size(world.workers) >= world.p.workers_max do
+    mode = if kind == :spare, do: :wait, else: :idle
+    worker = %{cell: cell, kind: kind, carry: nil, mode: mode}
+
+    world = %{
       world
+      | workers: Map.put(world.workers, id, worker),
+        counts: Map.update!(world.counts, kind, &(&1 + 1))
+    }
+
+    if jump, do: event(world, :worker_set, {id, cell, flags(worker) + 2}), else: world
+  end
+
+  defp remove_worker(world, id) do
+    worker = Map.fetch!(world.workers, id)
+
+    %{
+      world
+      | workers: Map.delete(world.workers, id),
+        counts: Map.update!(world.counts, worker.kind, &(&1 - 1)),
+        freed_ids: [id | world.freed_ids]
+    }
+    |> event(:worker_gone, id)
+  end
+
+  @doc false
+  # The flags of a worker in a message: 1 = carries food, 4 = carries an egg, 8 = carrier.
+  def flags(worker) do
+    carry =
+      case worker.carry do
+        nil -> 0
+        :egg -> 4
+        _ -> 1
+      end
+
+    carry + if(worker.kind == :carrier, do: 8, else: 0)
+  end
+
+  # The nest makes one spare body for each `food_per_body` units of food.
+  defp make_spare(world) do
+    if world.food_credit >= world.p.food_per_body and world.counts.spare < world.p.spare_max do
+      world = %{world | food_credit: world.food_credit - world.p.food_per_body}
+      make_spare(add_worker(world, :spare, world.nest))
     else
-      {id, world} =
-        case world.free_ids do
-          [id | rest] -> {id, %{world | free_ids: rest}}
-          [] -> {world.next_worker, %{world | next_worker: world.next_worker + 1}}
-        end
-
-      worker = %{cell: world.grid.nest, carry: nil, mode: :idle}
-
-      %{world | workers: Map.put(world.workers, id, worker)}
-      # Flag 2: the worker starts at a new position.
-      |> event(:worker_set, {id, world.grid.nest, 2})
+      %{world | food_credit: min(world.food_credit, world.p.food_per_body)}
     end
   end
 
-  # With few spare bodies, the nest makes one worker each some seconds.
-  defp low_workers(world) do
+  # With few spare bodies and no pile with food that a body can walk to, the nest makes
+  # one spare body each some seconds.
+  defp low_help(world) do
     cond do
-      map_size(world.workers) >= world.p.workers_low ->
+      world.counts.spare >= world.p.spare_low or food_piles(world) != [] ->
         %{world | low_tick: world.tick}
 
-      world.tick - world.low_tick >= world.p.worker_ticks ->
-        make_worker(%{world | low_tick: world.tick})
+      world.tick - world.low_tick >= world.p.spare_ticks ->
+        add_worker(%{world | low_tick: world.tick}, :spare, world.nest)
 
       true ->
         world
@@ -759,13 +978,15 @@ defmodule Colony.World do
     {col, world} = pile_column(world, k)
     row = Grid.river_start(grid, k) + Grid.river_width(grid, k, col) + world.p.pile_rows - 1
     cell = Grid.cell(grid, row, col)
-    size = Enum.at(world.p.pile_units, k - 1) || List.last(world.p.pile_units)
+    {size, least} = pile_size(world, k)
 
     pile = %{
       id: k,
       cell: cell,
       col: col,
       size: size,
+      # The pile does not lose units below this number.
+      least: least,
       units: size,
       appeared: world.now,
       # The time of the crossing to the land of the pile. Before it, no body can walk to
@@ -778,34 +999,66 @@ defmodule Colony.World do
     way = flood(grid, [cell], %{cell => 0}, 1, :infinity, &walkable?(world, &1))
 
     %{world | piles: Map.put(world.piles, k, pile), to_pile: Map.put(world.to_pile, k, way)}
-    |> flag(:food)
+    |> event(:piles, k)
   end
 
-  # Pile 1 is near the column of the nest. Each later pile is in a random column that is
-  # not near an edge of the world.
+  @doc """
+  The size of pile `k` and the least number of its units: `{size, least}`.
+
+  Pile `k` pays for the bridge across river `k + 1`. With `R` the highest "Random" and `B`
+  "Best" of the table of the open cells for the largest width of that river, the size is
+  `food_per_body * pile_factor * R` and the least is `food_per_body * pile_least_factor * B`.
+  The last pile of a world with an end has numbers of its own.
+  """
+  def pile_size(world, k) do
+    p = world.p
+
+    case Grid.limits(world.cfg, k + 1) do
+      nil ->
+        {p.last_pile_units, p.last_pile_least}
+
+      {_least, most} ->
+        r = Map.fetch!(p.bridge_random, most)
+        b = Map.fetch!(p.bridge_best, most)
+
+        {round(p.food_per_body * p.pile_factor * r),
+         round(p.food_per_body * p.pile_least_factor * b)}
+    end
+  end
+
+  # Pile 1 is near the column of the nest. Each later pile is 12 columns or less from the
+  # pile before it, and not near an edge of the world.
   defp pile_column(world, k) do
     grid = world.grid
     last = grid.width - 1
-    nest_col = Grid.col(grid, grid.nest)
+    margin = min(world.p.pile_edge_columns, div(last, 2))
 
     {low, high} =
-      if k == 1 do
-        {max(0, nest_col - world.p.pile_first_columns),
-         min(last, nest_col + world.p.pile_first_columns)}
-      else
-        margin = min(world.p.pile_edge_columns, div(last, 2))
-        {margin, last - margin}
+      case Map.get(world.piles, k - 1) do
+        nil ->
+          nest_col = Grid.col(grid, world.nest)
+
+          {max(0, nest_col - world.p.pile_first_columns),
+           min(last, nest_col + world.p.pile_first_columns)}
+
+        before ->
+          shift = world.p.pile_shift_columns
+          {max(margin, before.col - shift), min(last - margin, before.col + shift)}
       end
 
     {n, rng} = :rand.uniform_s(high - low + 1, world.rng)
     {low + n - 1, %{world | rng: rng}}
   end
 
-  # A pile that no body can walk to loses units, down to a limit.
+  # A pile that no body can walk to loses units, down to its least number.
   defp pile_loss(world) do
     with true <- rem(div(world.tick, world.p.rate), world.p.pile_loss) == 0,
-         %{units: units} = pile when units > world.p.pile_least <- far_pile(world) do
-      flag(%{world | piles: Map.put(world.piles, pile.id, %{pile | units: units - 1})}, :food)
+         %{units: units, least: least} = pile when units > least <- far_pile(world) do
+      event(
+        %{world | piles: Map.put(world.piles, pile.id, %{pile | units: units - 1})},
+        :piles,
+        pile.id
+      )
     else
       _ -> world
     end
@@ -818,50 +1071,103 @@ defmodule Colony.World do
   defp crossing(world, k) do
     pile = %{Map.fetch!(world.piles, k) | crossed: world.now}
     world = %{world | piles: Map.put(world.piles, k, pile), stage: k + 1}
+    world = event(world, :piles, k)
     world = make_record(world, k, pile)
-    world = send_to_pile(%{world | period: %{}}, k)
-    if k < rivers(world), do: add_pile(world, k + 1), else: flag(world, :food)
+    world = %{world | period: %{}}
+    world = move_nest(world, k)
+    world = if Grid.limits(world.cfg, k + 1), do: add_pile(world, k + 1), else: world
+    flag(world, :food)
   end
 
-  # At a crossing, the workers that waited go across the bridge. The worker at the end of
-  # the line goes to the new pile. The other workers go to the next crossing place: they
-  # stay spare bodies near the player who made the crossing. After the last crossing, all
-  # of them go to the pile. See also `Colony.Workers`: a new pile calls workers.
-  defp send_to_pile(world, k) do
-    way = Map.fetch!(world.to_pile, k)
-    waiting = for {_id, %{mode: :wait}} = entry <- world.workers, do: entry
-    count = if k == rivers(world), do: length(waiting), else: 1
+  # The nest moves to the foot of the new bridge: some rows south of its first body. The
+  # colony gets new carriers there. The carriers with no food carry eggs from the old
+  # nest to the new nest.
+  defp move_nest(world, k) do
+    grid = world.grid
 
-    workers =
-      waiting
-      |> Enum.sort_by(fn {id, worker} -> {Map.get(way, worker.cell, 1_000_000), id} end, :desc)
-      |> Enum.take(count)
-      |> Enum.reduce(world.workers, fn {id, worker}, workers ->
-        Map.put(workers, id, %{worker | mode: {:fetch, k}})
+    {first, _body} =
+      world.locked
+      |> Enum.filter(fn {cell, _} -> Grid.river(grid, cell) == k end)
+      |> Enum.min_by(fn {_, body} -> body.n end)
+
+    old = world.nest
+    # A small grid can have fewer rows south of the bridge: the row is 0 or more.
+    row = max(0, Grid.row(grid, first) - world.p.nest_rows)
+    nest = nest_cell(world, Grid.cell(grid, row, Grid.col(grid, first)))
+
+    world = %{
+      world
+      | nest: nest,
+        old_nests: [%{cell: old, land: Grid.land(grid, old)} | world.old_nests]
+    }
+
+    world =
+      Enum.reduce(1..world.p.carriers_per_crossing//1, world, fn _, world ->
+        if world.counts.carrier < world.p.carriers_max,
+          do: add_worker(world, :carrier, nest),
+          else: world
       end)
 
-    %{world | workers: workers}
+    # The new carriers stay. Each older carrier with no food goes to the old nest for an egg.
+    workers =
+      Map.new(world.workers, fn
+        {id, %{kind: :carrier, carry: nil, cell: cell} = worker} when cell != nest ->
+          {id, %{worker | mode: {:egg, :fetch}}}
+
+        entry ->
+          entry
+      end)
+
+    to_old = flood(grid, [old], %{old => 0}, 1, :infinity, &walkable?(world, &1))
+
+    %{world | workers: workers, to_old_nest: to_old}
+    |> refresh_walk()
+    |> flag(:nest)
   end
+
+  # The cell for the nest: the cell itself if it is a land cell with no pile, or the
+  # nearest such cell.
+  defp nest_cell(world, cell) do
+    grid = world.grid
+    piles = MapSet.new(world.piles, fn {_id, pile} -> pile.cell end)
+    free? = &(Grid.kind(grid, &1) == :land and not MapSet.member?(piles, &1))
+
+    if free?.(cell) do
+      cell
+    else
+      0..(grid.count - 1)
+      |> Enum.filter(free?)
+      |> Enum.min_by(&{Grid.distance(grid, &1, cell), &1})
+    end
+  end
+
+  @doc "The number of bodies of the best bridge across a river of a width, from the table."
+  def best_bodies(world, width), do: Map.get(world.p.bridge_best, width)
 
   defp make_record(world, k, pile) do
     grid = world.grid
     cells = bridge(world, k)
+    width = cells |> Enum.map(&Grid.river_width(grid, k, Grid.col(grid, &1))) |> Enum.max()
 
     bodies =
       cells
       |> Enum.map(&Map.fetch!(world.locked, &1))
-      |> Enum.frequencies_by(&{&1.name, &1.helper})
+      |> Enum.frequencies_by(fn body ->
+        if body.helper, do: {:helper, body.name}, else: {:person, body.owner}
+      end)
 
     record = %{
       id: k,
       time: world.now,
       # The seconds from the first lock of the bridge to the crossing.
       seconds: max(0, world.now - Map.get(world.first_lock, k, world.now)),
-      names: record_names(bodies, world.period),
+      names: record_names(world, bodies, world.period),
       bodies: length(cells),
       rows: cells |> Enum.map(&Grid.row(grid, &1)) |> Enum.uniq() |> length(),
-      # The width of the river in the widest column of the bridge.
-      width: cells |> Enum.map(&Grid.river_width(grid, k, Grid.col(grid, &1))) |> Enum.max(),
+      # The width of the river in the widest column of the bridge, and the bodies of the
+      # best bridge across a river of that width.
+      width: width,
+      best: best_bodies(world, width),
       # The units of the pile at the crossing, and its units at the start.
       left: pile.units,
       size: pile.size
@@ -872,23 +1178,36 @@ defmodule Colony.World do
     |> event(:records, Map.put(record, :first, true))
   end
 
-  defp record_names(bodies, food) do
+  defp record_names(world, bodies, food) do
     for key <- Enum.uniq(Map.keys(bodies) ++ Map.keys(food)) do
-      {name, helper} = key
-      %{name: name, helper: helper, bodies: Map.get(bodies, key, 0), food: Map.get(food, key, 0)}
+      entry(world, key, Map.get(bodies, key, 0), Map.get(food, key, 0))
     end
     |> Enum.sort_by(&{-&1.bodies, -&1.food, &1.name})
   end
 
-  # After the last crossing, the food that a player carries counts in the last record.
-  defp count_last_record(world, by, units) do
-    with true <- world.stage > rivers(world), [record | rest] <- world.records do
-      {name, helper} = by
+  defp entry(world, {:person, number}, bodies, food) do
+    name = world.people |> Map.get(number, %{name: ""}) |> Map.fetch!(:name)
+    %{name: name, helper: false, owner: number, bodies: bodies, food: food}
+  end
+
+  defp entry(_world, {:helper, name}, bodies, food) do
+    %{name: name, helper: true, owner: nil, bodies: bodies, food: food}
+  end
+
+  # After the last crossing of a world with an end, the food that a player carries counts
+  # in the last record.
+  defp count_last_record(world, _player, key, units) do
+    with true <- world.stage > rivers(world) and not Grid.endless?(world.cfg),
+         [record | rest] <- world.records do
+      same? = fn entry ->
+        entry(world, key, 0, 0) |> Map.take([:name, :helper, :owner]) ==
+          Map.take(entry, [:name, :helper, :owner])
+      end
 
       names =
-        case Enum.split_with(record.names, &(&1.name == name and &1.helper == helper)) do
+        case Enum.split_with(record.names, same?) do
           {[entry], others} -> [%{entry | food: entry.food + units} | others]
-          {[], others} -> [%{name: name, helper: helper, bodies: 0, food: units} | others]
+          {[], others} -> [entry(world, key, 0, units) | others]
         end
         |> Enum.sort_by(&{-&1.bodies, -&1.food, &1.name})
 
@@ -946,8 +1265,9 @@ defmodule Colony.World do
       world
       |> decay_scent()
       |> pile_loss()
-      |> low_workers()
+      |> low_help()
       |> send_records()
+      |> end_eggs()
     else
       world
     end
@@ -961,6 +1281,15 @@ defmodule Colony.World do
     else
       world
     end
+  end
+
+  # When no carrier goes for an egg, the map of the way to the old nest is not necessary.
+  defp end_eggs(%{to_old_nest: way} = world) when way == %{}, do: world
+
+  defp end_eggs(world) do
+    if Enum.any?(world.workers, fn {_id, worker} -> worker.mode == {:egg, :fetch} end),
+      do: world,
+      else: %{world | to_old_nest: %{}}
   end
 
   defp step_players(world) do
@@ -977,7 +1306,7 @@ defmodule Colony.World do
   # A player who touches a pile takes food. A player with food who touches the nest puts
   # the food into the nest. A helper takes food only when it goes for food.
   defp carry_food(world, id, %{carry: nil} = player) do
-    if player.helper == nil or player.helper.goal == :food do
+    if player.helper == nil or player.helper.goal == :pile do
       pile =
         Enum.find_value(world.piles, fn {_id, pile} ->
           if pile.units > 0 and pile.crossed != nil and
@@ -997,10 +1326,10 @@ defmodule Colony.World do
   end
 
   defp carry_food(world, id, %{carry: carry} = player) do
-    if near?(world, player, world.grid.nest, world.p.nest_touch) do
+    if near?(world, player, world.nest, world.p.nest_touch) do
       world
-      |> put_player(id, %{player | carry: nil})
-      |> add_nest_food(carry.pile, carry.units, {player.name, player.helper != nil})
+      |> put_player(id, %{player | carry: nil, last: :carry})
+      |> add_nest_food(carry.pile, carry.units, player)
     else
       world
     end
@@ -1023,25 +1352,31 @@ defmodule Colony.World do
 
   # All the values that tell a body where to go.
   defp refresh_ways(world) do
-    grid = world.grid
     open? = &walkable?(world, &1)
-    walk = flood(grid, [grid.nest], %{grid.nest => 0}, 1, :infinity, open?)
 
     to_pile =
-      Map.new(world.piles, fn {id, pile} ->
-        {id, flood(grid, [pile.cell], %{pile.cell => 0}, 1, :infinity, open?)}
-      end)
+      for {id, pile} <- world.piles, pile.units > 0, into: %{} do
+        {id, flood(world.grid, [pile.cell], %{pile.cell => 0}, 1, :infinity, open?)}
+      end
 
-    %{world | walk: walk, to_pile: to_pile}
+    %{world | to_pile: to_pile}
+    |> refresh_walk()
     |> refresh_open()
     |> refresh_front()
+  end
+
+  # The number of steps on foot to the nest, for each cell that has a way to the nest.
+  defp refresh_walk(world) do
+    nest = world.nest
+    walk = flood(world.grid, [nest], %{nest => 0}, 1, :infinity, &walkable?(world, &1))
+    %{world | walk: walk}
   end
 
   # The open cells of the river that the colony builds a bridge across now.
   defp refresh_open(world) do
     case far_pile(world) do
       nil ->
-        flag(%{world | open: MapSet.new()}, :structure)
+        flag(%{world | open: %{}}, :open)
 
       pile ->
         grid = world.grid
@@ -1052,8 +1387,8 @@ defmodule Colony.World do
               abs(col - pile.col) <= world.p.start_columns,
               do: Grid.cell(grid, row, col)
 
-        open = Support.open(grid, world.rule, world.locked, pile.id, start)
-        flag(%{world | open: MapSet.new(open)}, :structure)
+        open = Support.open_gains(grid, world.rule, world.locked, pile.id, start)
+        flag(%{world | open: Map.new(open)}, :open)
     end
   end
 
@@ -1062,7 +1397,7 @@ defmodule Colony.World do
   # land, near the column of the pile. With a bridge, they are bodies of the bridge.
   defp refresh_front(world) do
     sources =
-      for cell <- world.open,
+      for {cell, _gain} <- world.open,
           to <- Grid.neighbors(world.grid, cell),
           walkable?(world, to),
           uniq: true,

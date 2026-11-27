@@ -16,7 +16,8 @@ end
 # Optional values from the environment. They change the game config for one run.
 overrides =
   [
-    workers: System.get_env("COLONY_WORKERS"),
+    carriers: System.get_env("COLONY_CARRIERS"),
+    spare: System.get_env("COLONY_SPARE"),
     helpers: System.get_env("COLONY_HELPERS"),
     seed: System.get_env("COLONY_SEED")
   ]

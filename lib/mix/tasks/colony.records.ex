@@ -28,7 +28,9 @@ defmodule Mix.Tasks.Colony.Records do
         {:ok, %{version: ^version} = saved} ->
           # The story needs the rivers. The world of the file gives them. No worker and no
           # helper is necessary.
-          world = World.new(Keyword.merge(cfg, helpers: 0), %{saved | workers: 0})
+          world =
+            World.new(Keyword.merge(cfg, helpers: 0), %{saved | workers: %{carrier: 0, spare: 0}})
+
           story = World.story(world)
 
           %{

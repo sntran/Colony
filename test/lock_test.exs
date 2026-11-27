@@ -5,9 +5,9 @@ defmodule Colony.LockTest do
 
   alias Colony.{Grid, Sim, World}
 
-  # A world with the rivers of the game, 10 workers and one player.
+  # A world with the rivers of the game, 10 spare bodies and one player.
   defp start(changes \\ []) do
-    {world, id} = World.join(World.new(Sim.cfg(Keyword.merge([workers: 10], changes))), "Tester")
+    {world, id} = World.join(World.new(Sim.cfg(Keyword.merge([spare: 10], changes))), "Tester")
     %{world: world, id: id, col: world.piles[1].col}
   end
 
@@ -38,14 +38,14 @@ defmodule Colony.LockTest do
     end
 
     test "a lock with no spare body gets an error" do
-      %{world: world, id: id, col: col} = start(workers: 1)
+      %{world: world, id: id, col: col} = start(spare: 1)
       assert World.spare(world) == 1
       world = Sim.lock!(world, id, Sim.river_cell(world, 1, col))
       assert World.spare(world) == 0
 
       # The cell is open, and the body touches it. Only the spare body is not there.
       world = Sim.wait_ready(world, id)
-      [cell | _] = Enum.sort(world.open)
+      [cell | _] = Sim.open(world)
       world = Sim.walk(world, id, Sim.river_cell(world, 1, col))
       assert cell in Grid.neighbors(world.grid, world.players[id].cell)
       assert {{:error, :not_possible}, _} = World.lock(world, id, cell)
@@ -87,7 +87,7 @@ defmodule Colony.LockTest do
   describe "the new body of the player" do
     test "a lock uses one spare body: the player has the body of the nearest worker" do
       %{world: world, id: id, col: col} = start()
-      # The workers go to the crossing place.
+      # The spare bodies go to the crossing place.
       world = Sim.run(world, 300)
       cell = Sim.river_cell(world, 1, col)
       edge = Grid.cell(world.grid, 13, col)
@@ -117,7 +117,7 @@ defmodule Colony.LockTest do
 
       # The player goes to the bridge immediately, and the lock is refused until the
       # second is at its end.
-      [next | _] = Enum.sort(world.open)
+      [next | _] = Sim.open(world)
       first = Sim.river_cell(world, 1, col)
       path = Sim.path(world, world.players[id].cell, first)
       assert length(path) <= 3
@@ -133,27 +133,6 @@ defmodule Colony.LockTest do
       assert {{:error, :not_possible}, _} = World.lock(world, id, next)
       world = Sim.run(world, tick + 10 - world.tick)
       assert {:ok, _} = World.lock(world, id, next)
-    end
-
-    test "a worker with no food is used first, and a player who locks loses the food" do
-      %{world: world, id: id} = start(workers: 12, rivers: [{5, 5}, {9, 9}])
-      world = Sim.cross!(world, id, 1)
-      # After the crossing, the workers carry food from pile 1.
-      {world, _} =
-        Sim.run_until(world, 600, fn world ->
-          Enum.count(world.workers, fn {_id, worker} -> worker.carry != nil end) >= 3
-        end)
-
-      # The player takes food and goes to the next river.
-      world = Sim.walk(world, id, world.piles[1].cell)
-      world = Sim.run(world, 1)
-      assert world.players[id].carry == %{pile: 1, units: 10}
-      [cell | _] = Enum.sort(world.open)
-      {:ok, world} = Sim.walk_and_lock(world, id, cell)
-
-      # The new body is the body of a worker that carried no food.
-      assert world.players[id].carry == nil
-      assert world.piles[1].units <= 300 - 10
     end
 
     test "a player who joins gets a body at the nest, and this uses no spare body" do
@@ -182,8 +161,8 @@ defmodule Colony.LockTest do
     test "a free body cannot jump across a cell where a body cannot be" do
       %{world: world, id: id, col: col} = start(rivers: [{7, 7}])
       world = Sim.lock!(world, id, Sim.river_cell(world, 1, col))
-      world = Sim.lock!(world, id, Enum.min(world.open))
-      world = Sim.lock!(world, id, Enum.min(world.open))
+      world = Sim.lock!(world, id, hd(Sim.open(world)))
+      world = Sim.lock!(world, id, hd(Sim.open(world)))
       [first, second, third] = Enum.sort(World.bridge(world, 1))
       world = Sim.walk(world, id, first)
       # The body waits and gets all the movement that the world lets it keep.
@@ -222,7 +201,7 @@ defmodule Colony.LockTest do
     end
 
     test "a locked body stays: no rule removes it" do
-      %{world: world, id: id} = start(workers: 30)
+      %{world: world, id: id} = start(spare: 30)
       world = Sim.cross!(world, id, 1)
       bodies = Map.keys(world.locked)
       world = world |> World.leave(id) |> Sim.run(3000)

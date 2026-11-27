@@ -75,7 +75,7 @@ defmodule Colony.ContractMonitorTest do
     # The first cell of the way to a cell that touches an open cell.
     step =
       if body do
-        world.open
+        Map.keys(world.open)
         |> Enum.flat_map(&Colony.Grid.neighbors(grid, &1))
         |> Enum.filter(&World.walkable?(world, &1))
         |> Enum.map(&Colony.Sim.path(world, body.cell, &1))
@@ -98,7 +98,7 @@ defmodule Colony.ContractMonitorTest do
   end
 
   test "a correct run has no violation" do
-    context = start(helpers: 0, workers: 1)
+    context = start(helpers: 0, spare: 1)
     assert send!(context, {:join, :p1}) == :ok
     # The nest is the cell 2. The cells 6 to 11 are the first row of the river.
     assert send!(context, {:move, :p1, 3}) == :ok
@@ -129,7 +129,7 @@ defmodule Colony.ContractMonitorTest do
   end
 
   test "after a lock, the player has the body of a worker and cannot lock for a moment" do
-    context = start(helpers: 0, workers: 5)
+    context = start(helpers: 0, spare: 5)
     assert send!(context, {:join, :p1}) == :ok
     assert send!(context, {:move, :p1, 3}) == :ok
     assert {:ok, cell} = send!(context, {:lock, :p1, 8})
@@ -144,7 +144,7 @@ defmodule Colony.ContractMonitorTest do
   test "the monitor sees a world that does not obey the contract" do
     # A world with a wrong support rule: its bank support is 3, and the contract says 2.
     # It has no helper, thus the lock of the player is the first step that is wrong.
-    context = start(bank_support: 3, helpers: 0, workers: 3)
+    context = start(bank_support: 3, helpers: 0, spare: 3)
     assert Monitor.call(context.monitor, {:join, :p1}) == :ok
     assert Monitor.call(context.monitor, {:move, :p1, 3}) == :ok
     assert {:ok, _at} = Monitor.call(context.monitor, {:lock, :p1, 8})

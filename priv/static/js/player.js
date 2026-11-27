@@ -23,6 +23,11 @@ export class Player {
     this.me = world.me;
     // The open cell that a lock uses now, or -1.
     this.target = -1;
+    // The guide now: see guide.js.
+    this.current = null;
+    // My last act: "lock", "carry" or null. The rule "share the work" uses it.
+    this.last = null;
+    this.carried = false;
     // The body that this player took cannot lock before this time, in milliseconds.
     this.restUntil = 0;
     // True while the page waits for the reply of a lock.
@@ -71,10 +76,14 @@ export class Player {
       const still = Math.hypot(sx, sy) <= 0.01;
       const dx = still ? Math.sin(me.heading) : this.push[0];
       const dz = still ? Math.cos(me.heading) : this.push[1];
-      this.target = this.guide.target(me.x, me.z, dx, dz);
+      this.target = this.guide.lockCell(me.x, me.z, dx, dz);
     } else {
       this.target = -1;
     }
+    // When my food gets into the nest, my last act is "carry".
+    if (this.carried && !me.carry) this.last = "carry";
+    this.carried = me.carry;
+    this.current = this.guide.guide(me, this.last);
   }
 
   walk(dt, sx, sy) {
@@ -130,8 +139,8 @@ export class Player {
   // Returns true if the body moved.
   around(dx, dz, step) {
     const me = this.me;
-    const goal = this.guide.goal(me);
-    const route = goal ? this.guide.route(goal, me.x, me.z) : null;
+    const guide = this.guide.guide(me, this.last);
+    const route = guide ? guide.route : null;
     if (!route || route.steps === 0) return false;
     // Only if the goal is in front of the push, not behind it.
     if ((route.x - me.x) * dx + (route.z - me.z) * dz <= 0) return false;
@@ -174,17 +183,34 @@ export class Player {
   // True if a tap on the button locks: an open cell touches the cell of the body, the
   // colony has a spare body, and the body can lock.
   ready(now) {
-    return this.me.alive && this.target >= 0 && this.world.freeWorkers > 0 && now >= this.restUntil && !this.lockPending;
+    return this.me.alive && !this.me.carry && this.target >= 0 && this.world.spare > 0 && now >= this.restUntil && !this.lockPending;
+  }
+
+  // The state of the button: the first state that applies.
+  //   "food": I carry food. "none": the colony has no spare body. "rest": my new body
+  //   rests. "lock": a lock is possible. "wait": the guide has no target. "dim": my cell
+  //   does not touch an open cell.
+  button(now) {
+    const me = this.me;
+    if (!me.alive) return "dim";
+    if (me.carry) return "food";
+    if (this.world.spare === 0) return "none";
+    if (now < this.restUntil) return "rest";
+    if (this.ready(now)) return "lock";
+    if (!this.current) return "wait";
+    return "dim";
   }
 
   // Locks the body into the open cell. Returns a promise of the result:
-  // { cell, from: [x, z], to: [x, z] } for a lock, "spare" if the colony has no spare
-  // body, or null if a lock is not possible.
+  // { cell, from: [x, z], to: [x, z] } for a lock, "carry" if my body carries food,
+  // "spare" if the colony has no spare body, or null if a lock is not possible.
   lock(now, clock = () => now) {
     const me = this.me;
     const world = this.world;
     if (!me.alive || this.lockPending) return Promise.resolve(null);
-    if (this.target >= 0 && world.freeWorkers === 0) return Promise.resolve("spare");
+    // A body that carries food cannot lock.
+    if (me.carry) return Promise.resolve("carry");
+    if (world.spare === 0) return Promise.resolve("spare");
     if (!this.ready(now)) return Promise.resolve(null);
     const cell = this.target;
     const at = toBase64(encodeMove(me.x, me.z, me.heading));
@@ -204,8 +230,8 @@ export class Player {
       const picture = world.takeWorker(body.worker);
       if (picture) me.heading = picture[2];
       this.place(body.x, body.z);
-      me.carry = false;
       this.restUntil = clock() + 1000;
+      this.last = "lock";
       this.locks++;
       const grid = world.grid;
       this.lockLog.push({ cell, distance: Math.hypot(body.x - grid.x(cell), body.z - grid.z(cell)) });

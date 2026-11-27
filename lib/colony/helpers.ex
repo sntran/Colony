@@ -3,20 +3,20 @@ defmodule Colony.Helpers do
   The rules of the helpers.
 
   A helper is a body that the server controls with the rules of a player: the same speed,
-  the same lock rule, and at a lock it takes the body of a worker.
+  the same lock rule, and at a lock it takes the body of a spare body. A helper obeys the
+  guide (`Colony.Guide`), as a person does with the page:
 
-  1. A helper with food goes to the nest.
-  2. If the colony has a spare body and an open cell, the helper goes to the nearest open
-     cell and locks. All the helpers together lock one time each `helper_lock_seconds / n`
-     seconds, with `n` helpers, and they lock in turn. Thus a bridge grows at a constant
-     speed that a person can see.
-  3. If not, the helper goes to the nearest pile with food and carries food to the nest,
-     as a player does.
+  - The guide shows an open cell: the helper goes to it and locks. All the helpers
+    together lock one time each `helper_lock_seconds / n` seconds, with `n` helpers, and
+    they lock in turn. Thus a bridge grows at a constant speed that a person can see.
+  - The guide shows a pile: the helper goes to it and takes food.
+  - The guide shows the nest: the helper brings the food to the nest.
+  - No target: the helper waits.
   """
 
-  alias Colony.{Grid, World}
+  alias Colony.{Grid, Guide, World}
 
-  # A helper looks for work again after this many ticks.
+  # A helper asks the guide again after this many ticks.
   @look_ticks 10
 
   @doc "The state of the rules of helper number `n`."
@@ -32,116 +32,54 @@ defmodule Colony.Helpers do
 
   defp act(world, id, %{helper: helper} = player) do
     look? = rem(world.tick + helper.n, @look_ticks) == 0
+    # The goal changes at once when the body gets or loses food.
+    changed? = player.carry != nil != (helper.goal == :nest)
 
-    cond do
-      player.carry != nil ->
-        along(world, id, player, %{helper | goal: :nest, target: nil}, world.walk)
+    if look? or changed? or helper.goal == nil do
+      plan(world, id, player)
+    else
+      go(world, id, player)
+    end
+  end
 
-      helper.goal == :lock ->
+  # Asks the guide for the target, then goes one tick to it.
+  defp plan(world, id, %{helper: helper} = player) do
+    helper =
+      case Guide.target(world, player) do
+        {:open, cell, _stand, path} -> %{helper | goal: :open, target: cell, path: path}
+        {:pile, pile, _cell} -> %{helper | goal: :pile, target: pile, path: []}
+        {:nest, cell} -> %{helper | goal: :nest, target: cell, path: []}
+        nil -> %{helper | goal: :wait, target: nil, path: []}
+      end
+
+    go(world, id, %{player | helper: helper})
+  end
+
+  defp go(world, id, %{helper: helper} = player) do
+    case helper.goal do
+      :open ->
         cond do
-          not World.open?(world, helper.target) or World.spare(world) == 0 ->
-            put(world, id, player, %{helper | goal: nil, target: nil, path: []})
-
-          helper.path != [] ->
-            walk(world, id, player)
-
-          true ->
-            try_lock(world, id, player)
+          not World.open?(world, helper.target) -> put(world, id, player, %{helper | goal: nil})
+          helper.path != [] -> walk(world, id, player)
+          true -> try_lock(world, id, player)
         end
 
-      look? or helper.goal == nil ->
-        plan(world, id, player)
+      :pile ->
+        case Map.get(world.to_pile, helper.target) do
+          nil -> put(world, id, player, %{helper | goal: nil})
+          way -> along(world, id, player, helper, way)
+        end
 
-      helper.goal == :food ->
-        go_to_food(world, id, player)
+      :nest ->
+        along(world, id, player, helper, world.walk)
 
-      true ->
-        world
+      _ ->
+        put(world, id, player, helper)
     end
   end
 
   defp put(world, id, player, helper) do
     World.put_player(world, id, %{player | helper: helper})
-  end
-
-  # ---------------------------------------------------------------------------
-  # The plan
-
-  defp plan(world, id, %{helper: helper} = player) do
-    place = if World.spare(world) > 0, do: place_to_lock(world, player.cell)
-
-    cond do
-      place != nil ->
-        {target, path} = place
-        put(world, id, player, %{helper | goal: :lock, target: target, path: path})
-
-      near_pile(world, player.cell) != nil ->
-        go_to_food(world, id, %{player | helper: %{helper | goal: :food, target: nil, path: []}})
-
-      true ->
-        put(world, id, player, %{helper | goal: :idle, target: nil, path: []})
-    end
-  end
-
-  # The nearest open cell: `{open cell, the way to a cell that touches it}`, or nil.
-  defp place_to_lock(world, from) do
-    if MapSet.size(world.open) == 0, do: nil, else: search(world, [from], %{from => nil})
-  end
-
-  defp search(_world, [], _before), do: nil
-
-  defp search(world, front, before) do
-    grid = world.grid
-
-    found =
-      Enum.find_value(Enum.sort(front), fn cell ->
-        case Enum.find(Grid.neighbors(grid, cell), &World.open?(world, &1)) do
-          nil -> nil
-          open -> {open, trace(before, cell, [])}
-        end
-      end)
-
-    if found do
-      found
-    else
-      {next, before} =
-        Enum.reduce(front, {[], before}, fn cell, acc ->
-          Enum.reduce(Grid.neighbors(grid, cell), acc, fn to, {next, before} = acc ->
-            if is_map_key(before, to) or not World.walkable?(world, to) do
-              acc
-            else
-              {[to | next], Map.put(before, to, cell)}
-            end
-          end)
-        end)
-
-      search(world, next, before)
-    end
-  end
-
-  defp trace(before, cell, path) do
-    case Map.fetch!(before, cell) do
-      nil -> path
-      previous -> trace(before, previous, [cell | path])
-    end
-  end
-
-  # The nearest pile with food that the helper can walk to.
-  defp near_pile(world, cell) do
-    world.piles
-    |> Enum.filter(fn {id, pile} ->
-      pile.units > 0 and is_map_key(Map.fetch!(world.to_pile, id), cell)
-    end)
-    |> Enum.min_by(fn {id, _pile} -> Map.fetch!(Map.fetch!(world.to_pile, id), cell) end, fn ->
-      nil
-    end)
-  end
-
-  defp go_to_food(world, id, %{helper: helper} = player) do
-    case near_pile(world, player.cell) do
-      nil -> put(world, id, player, %{helper | goal: nil})
-      {pile, _} -> along(world, id, player, helper, Map.fetch!(world.to_pile, pile))
-    end
   end
 
   # ---------------------------------------------------------------------------
@@ -158,15 +96,13 @@ defmodule Colony.Helpers do
             steps && steps > 0 &&
               Enum.find(Grid.neighbors(world.grid, player.cell), &(Map.get(way, &1) == steps - 1))
 
-          if next, do: [next], else: []
+          if next, do: [next], else: [player.cell]
 
         path ->
           path
       end
 
-    if path == [],
-      do: put(world, id, player, helper),
-      else: walk(world, id, %{player | helper: %{helper | path: path}})
+    walk(world, id, %{player | helper: %{helper | path: path}})
   end
 
   # Goes along the cells of the way, at the speed of a player.
@@ -211,14 +147,26 @@ defmodule Colony.Helpers do
         put(world, id, %{player | heading: heading}, helper)
 
       true ->
-        {:ok, world} = World.lock(world, id, target)
-        player = Map.fetch!(world.players, id)
-        count = Enum.count(world.players, fn {_id, other} -> other.helper != nil end)
-        ticks = div(world.p.helper_lock_ticks, count)
-        world = %{world | helper_tick: world.tick + ticks}
-        # The helper lets each other helper lock before its next lock.
-        next_lock = world.tick + ticks * count - div(ticks, 2)
-        put(world, id, player, %{helper | goal: nil, target: nil, path: [], next_lock: next_lock})
+        case World.lock(world, id, target) do
+          {:ok, world} ->
+            player = Map.fetch!(world.players, id)
+            count = Enum.count(world.players, fn {_id, other} -> other.helper != nil end)
+            ticks = div(world.p.helper_lock_ticks, count)
+            world = %{world | helper_tick: world.tick + ticks}
+            # The helper lets each other helper lock before its next lock.
+            next_lock = world.tick + ticks * count - div(ticks, 2)
+
+            put(world, id, player, %{
+              helper
+              | goal: nil,
+                target: nil,
+                path: [],
+                next_lock: next_lock
+            })
+
+          {_error, world} ->
+            put(world, id, player, %{helper | goal: nil, target: nil, path: []})
+        end
     end
   end
 end

@@ -7,7 +7,7 @@ defmodule Colony.SaveTest do
 
   # A world with two bridges of helpers and of a player, records, scent and food.
   defp played do
-    cfg = Sim.cfg(helpers: 3, workers: 30, seed: 77, helper_lock_seconds: 6)
+    cfg = Sim.cfg(helpers: 3, spare: 30, seed: 77, helper_lock_seconds: 6)
     {world, id} = World.join(World.new(Keyword.merge(cfg, helpers: 0)), "Bình")
     world = Sim.lock!(world, id, Sim.river_cell(world, 1, world.piles[1].col))
     world = World.set_helpers(world, 3)
@@ -59,7 +59,7 @@ defmodule Colony.SaveTest do
 
   @tag :tmp_dir
   test "a complete world stays complete after a load", %{tmp_dir: dir} do
-    cfg = Sim.cfg(workers: 40, rivers: [{5, 5}, {9, 9}])
+    cfg = Sim.cfg(spare: 40, rivers: [{5, 5}, {9, 9}])
     {world, id} = World.join(World.new(cfg), "Tester")
     world = world |> Sim.cross!(id, 1) |> Sim.cross!(id, 2)
     {world, ticks} = Sim.run_until(world, 3000, &(&1.complete != nil))
@@ -71,7 +71,7 @@ defmodule Colony.SaveTest do
     again = World.new(cfg, loaded)
     assert again.complete == world.complete
     assert again.stage == 3
-    assert MapSet.size(again.open) == 0
+    assert map_size(again.open) == 0
     assert World.story(again).complete == world.complete
   end
 
@@ -122,7 +122,7 @@ defmodule Colony.SaveTest do
       history: %{},
       food_nest: 3,
       food_credit: 0,
-      workers: 12,
+      spare: 12,
       records: []
     }
 

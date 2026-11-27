@@ -72,8 +72,11 @@ export function cssColor(color) {
   return `rgb(${color.map((part) => Math.round(part * 255)).join(",")})`;
 }
 
-// The plain color of all workers.
-export const WORKER_COLOR = [0.2, 0.115, 0.075];
+// A spare body: the body that a player gets at a lock. It has the size of a player.
+export const SPARE_COLOR = [0.4, 0.24, 0.13];
+
+// A carrier: smaller and darker. A lock never uses a carrier.
+export const CARRIER_COLOR = [0.11, 0.065, 0.04];
 
 // A helper is grey: it is not a person.
 export const HELPER_COLOR = [0.62, 0.64, 0.66];

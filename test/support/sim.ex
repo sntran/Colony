@@ -9,7 +9,7 @@ defmodule Colony.Sim do
   def cfg(changes \\ []) do
     :colony
     |> Application.fetch_env!(:game)
-    |> Keyword.merge(seed: 1, workers: 0, helpers: 0)
+    |> Keyword.merge(seed: 1, carriers: 0, spare: 0, helpers: 0)
     |> Keyword.merge(changes)
   end
 
@@ -105,7 +105,7 @@ defmodule Colony.Sim do
       world
     else
       ^k = world.stage
-      cell = world.open |> Enum.sort() |> pick.()
+      cell = world.open |> Map.keys() |> Enum.sort() |> pick.()
       cross!(lock!(world, id, cell), id, k, pick)
     end
   end
@@ -153,4 +153,23 @@ defmodule Colony.Sim do
 
   @doc "True if a free body can go on foot from the nest to the pile `k`."
   def way_to_pile?(world, k), do: is_map_key(world.walk, world.piles[k].cell)
+
+  @doc "The open cells, sorted."
+  def open(world), do: world.open |> Map.keys() |> Enum.sort()
+
+  @doc "The workers of a kind: `[{id, worker}]`."
+  def workers(world, kind), do: Enum.filter(world.workers, fn {_id, w} -> w.kind == kind end)
+
+  @doc """
+  The player walks to the pile `k`, takes food, and brings it to the nest. Returns the world.
+  """
+  def carry!(world, id, k) do
+    world = walk(world, id, world.piles[k].cell)
+    world = run(world, 1)
+    true = world.players[id].carry != nil
+    world = walk(world, id, world.nest)
+    world = run(world, 1)
+    nil = world.players[id].carry
+    world
+  end
 end

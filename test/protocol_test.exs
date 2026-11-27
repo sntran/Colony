@@ -9,13 +9,23 @@ defmodule Colony.ProtocolTest do
     assert mirror.tick == world.tick
 
     workers =
-      Map.new(world.workers, fn {id, w} -> {id, {w.cell, if(w.carry, do: 1, else: 0)}} end)
+      Map.new(world.workers, fn {id, w} ->
+        carry =
+          case w.carry do
+            nil -> nil
+            :egg -> :egg
+            _ -> :food
+          end
+
+        {id, %{cell: w.cell, carry: carry, kind: w.kind}}
+      end)
 
     assert mirror.workers == workers
     assert mirror.scent == world.scent
     assert mirror.structure == world.supports
-
     assert mirror.open == world.open
+    assert mirror.nest == world.nest
+    assert mirror.old_nests == world.old_nests
 
     assert mirror.food == %{
              nest: world.food_nest,
@@ -26,13 +36,20 @@ defmodule Colony.ProtocolTest do
     assert mirror.piles ==
              Map.new(world.piles, fn {id, pile} ->
                {id,
-                %{cell: pile.cell, units: pile.units, size: pile.size, far: pile.crossed == nil}}
+                %{
+                  cell: pile.cell,
+                  units: pile.units,
+                  size: pile.size,
+                  least: pile.least,
+                  far: pile.crossed == nil
+                }}
              end)
 
     for {cell, body} <- world.locked do
-      assert %{name: name, time: time, kind: kind, n: n} = mirror.locks[cell]
+      assert %{name: name, time: time, kind: kind, n: n, owner: owner} = mirror.locks[cell]
       assert name == body.name
       assert n == body.n
+      assert owner == (body.owner || 0)
       assert time == body.time
       assert kind == if(body.helper, do: 2, else: 1)
     end
@@ -48,7 +65,7 @@ defmodule Colony.ProtocolTest do
   end
 
   test "the snapshot has the rivers and the numbers of the support rule" do
-    world = World.new(Sim.cfg(workers: 30))
+    world = World.new(Sim.cfg(spare: 30))
     mirror = Mirror.new(world.grid, Protocol.snapshot(world, 0xFFFF))
 
     assert mirror.rivers ==
@@ -61,7 +78,8 @@ defmodule Colony.ProtocolTest do
     assert mirror.rule == %{bank: 96, costs: [12, 6, 4, 3]}
     assert mirror.you == 0xFFFF
     assert mirror.open == world.open
-    assert MapSet.size(mirror.open) == 13
+    assert map_size(mirror.open) == 13
+    assert mirror.nest == world.nest
   end
 
   test "a position of the full world keeps its value" do
@@ -73,7 +91,7 @@ defmodule Colony.ProtocolTest do
   end
 
   test "a client that joins late and reads each tick stays the same as the world" do
-    cfg = Sim.cfg(workers: 30, helpers: 4, helper_lock_seconds: 6)
+    cfg = Sim.cfg(spare: 30, helpers: 4, helper_lock_seconds: 6)
     {world, id} = World.join(World.new(Keyword.merge(cfg, helpers: 0)), "Chi")
     world = Sim.run(world, 35)
 
@@ -92,6 +110,7 @@ defmodule Colony.ProtocolTest do
             900 -> World.set_helpers(world, 1)
             1200 -> World.set_helpers(world, 4)
             1000 -> World.put_player(world, id, %{world.players[id] | carry: %{pile: 1, units: 10}})
+            1500 -> World.rename(world, id, "Chi Two")
             _ -> world
           end
 
@@ -107,17 +126,18 @@ defmodule Colony.ProtocolTest do
     assert map_size(world.piles) >= 3
     assert world.next_worker > 30 or world.free_ids != []
     assert mirror.players[id]
+    assert world.old_nests != []
   end
 
   test "a record is a map that JSON can have" do
-    world = World.new(Sim.cfg(workers: 30, helpers: 4))
+    world = World.new(Sim.cfg(spare: 30, carriers: 12, helpers: 4))
     {world, _} = Sim.run_until(world, 1200, &(&1.records != []))
     [record] = world.records
     json = record |> Protocol.record() |> JSON.encode!() |> JSON.decode!()
 
     assert %{
              "id" => 1,
-             "size" => 300,
+             "size" => 143,
              "names" => [
                %{"name" => "Helper " <> _, "helper" => true, "bodies" => _, "food" => 0} | _
              ]
@@ -128,7 +148,7 @@ defmodule Colony.ProtocolTest do
 
   test "a move from a client keeps its values" do
     binary = Protocol.encode_move(30.25, 5.196, :math.pi() / 2)
-    assert byte_size(binary) == 5
+    assert byte_size(binary) == 7
     assert {:ok, x, z, heading} = Protocol.decode_move(binary)
     assert_in_delta x, 30.25, 0.002
     assert_in_delta z, 5.196, 0.002
@@ -137,7 +157,7 @@ defmodule Colony.ProtocolTest do
   end
 
   test "a tick of 1,000 workers and 8 helpers is small" do
-    world = World.new(Sim.cfg(workers: 1000, workers_max: 1000, helpers: 8))
+    world = World.new(Sim.cfg(spare: 1000, spare_max: 1000, helpers: 8))
 
     {_world, bytes} =
       Enum.reduce(1..600, {world, 0}, fn _, {world, bytes} ->

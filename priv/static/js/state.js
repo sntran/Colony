@@ -4,7 +4,7 @@
 // keeps the positions that the page draws. lib/colony/protocol.ex tells the format.
 
 import { Grid, GAP, LAND } from "./hex.js";
-import { colorOf, WORKER_COLOR, HELPER_COLOR } from "./names.js";
+import { colorOf, SPARE_COLOR, CARRIER_COLOR, HELPER_COLOR } from "./names.js";
 
 const MAX_WORKERS = 8192;
 
@@ -20,6 +20,11 @@ export const MESH_STRIDE = 11;
 // A free body on a locked body is this much above the ground.
 const BRIDGE_HEIGHT = 0.1;
 const FOOD_COLOR = [1.0, 0.74, 0.2];
+const EGG_COLOR = [0.97, 0.96, 0.9];
+// A carrier is smaller and darker than a spare body. A spare body is the size of the body
+// of a player.
+const CARRIER_SCALE = 0.78;
+const SPARE_SCALE = 1.12;
 
 function hash01(value) {
   let x = Math.imul(value ^ 0x9e3779b9, 0x85ebca6b);
@@ -59,8 +64,11 @@ export class World {
 
     this.workers = {
       alive: new Uint8Array(MAX_WORKERS),
-      cell: new Uint16Array(MAX_WORKERS),
+      cell: new Uint32Array(MAX_WORKERS),
+      // 0: no load, 1: food, 2: an egg.
       carry: new Uint8Array(MAX_WORKERS),
+      // 1 for a carrier, 0 for a spare body.
+      carrier: new Uint8Array(MAX_WORKERS),
       x: new Float32Array(MAX_WORKERS),
       y: new Float32Array(MAX_WORKERS),
       z: new Float32Array(MAX_WORKERS),
@@ -70,7 +78,11 @@ export class World {
       still: new Float32Array(MAX_WORKERS),
     };
     this.workerEnd = 0;
-    this.freeWorkers = 0;
+    // The spare bodies and the carriers. A lock uses a spare body.
+    this.spare = 0;
+    this.carriers = 0;
+    // The person of this player: the server knows the person by the secret number.
+    this.person = 0;
 
     this.players = new Map();
     // id => { name, helper }
@@ -80,8 +92,14 @@ export class World {
     this.lockInfo = new Map();
     // This number changes each time the locked bodies or the open cells change.
     this.structure = 0;
-    // The open cells: a lock is possible there, and it helps.
-    this.open = new Set();
+    // The open cells: cell => gain. A lock is possible there, and it helps. In the
+    // "wider" phase, the gain tells how much a body there helps.
+    this.open = new Map();
+    this.openBest = 0;
+    // The nest and the nests before it: { cell, land }.
+    this.nest = 0;
+    this.oldNests = [];
+    this.nestKey = 0;
     this.scent = new Uint8Array(0);
     this.scentDirty = true;
     // The piles of food: id => { id, cell, units, size, far, changed }. `far` is true
@@ -97,7 +115,7 @@ export class World {
     this.time = 0;
     // Things that occurred in the last messages. The page makes sounds and marks from
     // them, then it removes them: locks, new workers, and units of food at the nest.
-    this.news = { locks: [], workers: 0, food: 0 };
+    this.news = { locks: [], workers: 0, food: 0, nest: false };
     // The story shows only the locked bodies with a number of this or less, and it can
     // hide the free bodies.
     this.storyLimit = Infinity;
@@ -150,7 +168,8 @@ export class World {
     this.names.clear();
     this.locked.clear();
     this.lockInfo.clear();
-    this.open = new Set();
+    this.open = new Map();
+    this.openBest = 0;
     this.piles.clear();
     this.structure++;
     this.scent.fill(0);
@@ -184,27 +203,27 @@ export class World {
       switch (tag) {
         case 1: {
           const width = view.getUint16(o, true);
-          const rows = view.getUint8(o + 2);
-          this.nest = view.getUint16(o + 3, true);
-          this.seed = view.getUint32(o + 5, true);
-          this.you = view.getUint16(o + 9, true);
-          this.rate = view.getUint8(o + 11);
-          this.speed = view.getUint8(o + 12) / 10;
-          this.decayTicks = view.getUint16(o + 13, true);
-          this.startTime = view.getUint32(o + 15, true);
-          const bank = view.getUint8(o + 19);
-          const costCount = view.getUint8(o + 20);
-          o += 21;
+          const rows = view.getUint16(o + 2, true);
+          this.seed = view.getUint32(o + 4, true);
+          this.you = view.getUint16(o + 8, true);
+          this.person = view.getUint16(o + 10, true);
+          this.rate = view.getUint8(o + 12);
+          this.speed = view.getUint8(o + 13) / 10;
+          this.decayTicks = view.getUint16(o + 14, true);
+          this.startTime = view.getUint32(o + 16, true);
+          const bank = view.getUint8(o + 20);
+          const costCount = view.getUint8(o + 21);
+          o += 22;
           const costs = [];
           for (let i = 0; i < costCount; i++) costs.push(view.getUint8(o + i));
           o += costCount;
           this.rule = { bank, costs };
-          const riverCount = view.getUint8(o);
-          o += 1;
+          const riverCount = view.getUint16(o, true);
+          o += 2;
           const rivers = [];
           for (let k = 0; k < riverCount; k++) {
-            rivers.push({ start: view.getUint8(o), widths: new Uint8Array(buffer.slice(o + 1, o + 1 + width)) });
-            o += 1 + width;
+            rivers.push({ start: view.getUint16(o, true), widths: new Uint8Array(buffer.slice(o + 2, o + 2 + width)) });
+            o += 2 + width;
           }
           this.grid = new Grid(width, rows, rivers);
           if (this.scent.length !== this.grid.count) this.scent = new Uint8Array(this.grid.count);
@@ -221,11 +240,11 @@ export class World {
           break;
         case 3:
           for (let i = 0; i < count; i++) {
-            const flags = view.getUint8(o + 4);
+            const flags = view.getUint8(o + 6);
             // A worker at a new position in a tick: the nest made it.
             if (!snapshot && flags & 2) this.news.workers++;
-            this.setWorker(view.getUint16(o, true), view.getUint16(o + 2, true), flags);
-            o += 5;
+            this.setWorker(view.getUint16(o, true), view.getUint32(o + 2, true), flags);
+            o += 7;
           }
           break;
         case 4:
@@ -247,15 +266,16 @@ export class World {
           break;
         case 6:
           for (let i = 0; i < count; i++) {
-            const cell = view.getUint16(o, true);
-            const helper = view.getUint8(o + 2) === 2;
-            const id = view.getUint16(o + 3, true);
-            const time = view.getUint32(o + 5, true);
-            const n = view.getUint16(o + 9, true);
-            const size = view.getUint8(o + 11);
-            const name = text.decode(new Uint8Array(buffer, o + 12, size));
-            o += 12 + size;
-            this.lockInfo.set(cell, { helper, time, name, n, from: snapshot ? null : this.lockStart(id) });
+            const cell = view.getUint32(o, true);
+            const helper = view.getUint8(o + 4) === 2;
+            const id = view.getUint16(o + 5, true);
+            const owner = view.getUint16(o + 7, true);
+            const time = view.getUint32(o + 9, true);
+            const n = view.getUint32(o + 13, true);
+            const size = view.getUint8(o + 17);
+            const name = text.decode(new Uint8Array(buffer, o + 18, size));
+            o += 18 + size;
+            this.lockInfo.set(cell, { helper, owner, time, name, n, from: snapshot ? null : this.lockStart(id) });
             if (!snapshot) {
               this.news.locks.push({ cell, id, name, helper, n });
               // The player has a different body now: its picture does not walk there.
@@ -264,35 +284,57 @@ export class World {
             }
           }
           break;
-        case 8: {
-          const locked = new Map();
+        case 7:
+          // A person has a new name: all the bodies of the person get it.
           for (let i = 0; i < count; i++) {
-            const cell = view.getUint16(o, true);
-            let body = this.locked.get(cell);
-            if (!body) body = this.newLocked(cell);
-            body.support = view.getUint8(o + 2);
-            locked.set(cell, body);
-            o += 3;
+            const person = view.getUint16(o, true);
+            const size = view.getUint8(o + 2);
+            const name = text.decode(new Uint8Array(buffer, o + 3, size));
+            o += 3 + size;
+            for (const body of this.locked.values()) {
+              if (body.owner === person && !body.helper) {
+                body.name = name;
+                body.color = lockedColor(colorOf(name));
+              }
+            }
+            for (const info of this.lockInfo.values()) if (info.owner === person && !info.helper) info.name = name;
+            this.news.renamed = true;
           }
-          this.locked = locked;
+          break;
+        case 8: {
+          // In the snapshot: all the locked bodies. In a tick: the bodies whose support
+          // changed. No step removes a locked body.
+          for (let i = 0; i < count; i++) {
+            const cell = view.getUint32(o, true);
+            let body = this.locked.get(cell);
+            if (!body) {
+              body = this.newLocked(cell);
+              this.locked.set(cell, body);
+            }
+            body.support = view.getUint8(o + 4);
+            o += 5;
+          }
           this.structure++;
-          for (const cell of this.lockInfo.keys()) if (!locked.has(cell)) this.lockInfo.delete(cell);
           break;
         }
         case 9: {
-          const open = new Set();
+          const open = new Map();
+          let best = 0;
           for (let i = 0; i < count; i++) {
-            open.add(view.getUint16(o, true));
-            o += 2;
+            const gain = view.getUint8(o + 4);
+            open.set(view.getUint32(o, true), gain);
+            best = Math.max(best, gain);
+            o += 5;
           }
           this.open = open;
+          this.openBest = best;
           this.structure++;
           break;
         }
         case 10:
           for (let i = 0; i < count; i++) {
-            this.scent[view.getUint16(o, true)] = view.getUint8(o + 2);
-            o += 3;
+            this.scent[view.getUint32(o, true)] = view.getUint8(o + 4);
+            o += 5;
           }
           this.scentDirty = true;
           break;
@@ -300,18 +342,18 @@ export class World {
           const food = view.getUint32(o, true);
           if (!snapshot && food > this.foodNest) this.news.food += food - this.foodNest;
           this.foodNest = food;
-          this.stage = view.getUint8(o + 4);
-          this.complete = view.getUint8(o + 5) === 1;
+          this.stage = view.getUint16(o + 4, true);
+          this.complete = view.getUint8(o + 6) === 1;
           this.foodDirty = true;
-          o += 6 * count;
+          o += 7 * count;
           break;
         }
         case 12:
           for (let i = 0; i < count; i++) {
             const id = view.getUint16(o, true);
             const x = view.getUint16(o + 2, true) / 500 - 1;
-            const z = view.getUint16(o + 4, true) / 500 - 1;
-            const heading = (view.getUint8(o + 6) / 256) * 2 * Math.PI;
+            const z = view.getUint32(o + 4, true) / 500 - 1;
+            const heading = (view.getUint8(o + 8) / 256) * 2 * Math.PI;
             let player = this.players.get(id);
             if (!player) {
               player = { x, y: 0, z, heading, phase: 0 };
@@ -321,34 +363,56 @@ export class World {
             player.tx = x;
             player.tz = z;
             player.theading = heading;
-            player.carry = view.getUint8(o + 7) === 1;
+            player.carry = view.getUint8(o + 9) === 1;
             player.seen = true;
             player.name = known.name;
             player.helper = known.helper;
             player.color = known.helper ? HELPER_COLOR : colorOf(known.name);
             if (id === this.you) this.me.carry = player.carry;
-            o += 8;
+            o += 10;
           }
           break;
         case 13: {
-          const piles = new Map();
-          let key = "";
+          // In the snapshot: all the piles. In a tick: the piles that changed.
           for (let i = 0; i < count; i++) {
-            const id = view.getUint8(o);
+            const id = view.getUint16(o, true);
             const before = this.piles.get(id);
-            const pile = { id, cell: view.getUint16(o + 1, true), units: view.getUint16(o + 3, true), size: view.getUint16(o + 5, true), far: view.getUint8(o + 7) === 1 };
+            const pile = {
+              id,
+              cell: view.getUint32(o + 2, true),
+              units: view.getUint16(o + 6, true),
+              size: view.getUint16(o + 8, true),
+              least: view.getUint16(o + 10, true),
+              far: view.getUint8(o + 12) === 1,
+            };
             // The time when the page saw the pile first. A pile of the snapshot was
             // there before.
             pile.born = before ? before.born : snapshot ? -100 : this.time;
             // The time of the last unit that the pile lost while no body can walk to it.
             pile.changed = before ? before.changed : -100;
             if (before && pile.far && pile.units < before.units) pile.changed = this.time;
-            piles.set(id, pile);
-            key += `${id}${pile.far ? "f" : pile.units > 0 ? "u" : "e"}`;
-            o += 8;
+            this.piles.set(id, pile);
+            o += 13;
           }
-          this.piles = piles;
+          let key = "";
+          for (const pile of this.piles.values()) key += `${pile.id}${pile.far ? "f" : pile.units > 0 ? "u" : "e"}`;
           this.pilesKey = key;
+          this.foodDirty = true;
+          break;
+        }
+        case 14: {
+          const nest = view.getUint32(o, true);
+          const old = view.getUint16(o + 4, true);
+          o += 6;
+          const nests = [];
+          for (let i = 0; i < old; i++) {
+            nests.push({ cell: view.getUint32(o, true), land: view.getUint16(o + 4, true) });
+            o += 6;
+          }
+          if (!snapshot && nest !== this.nest) this.news.nest = { from: this.nest, to: nest };
+          this.nest = nest;
+          this.oldNests = nests;
+          this.nestKey++;
           this.foodDirty = true;
           break;
         }
@@ -375,7 +439,8 @@ export class World {
     }
     w.alive[id] = 1;
     w.cell[id] = cell;
-    w.carry[id] = flags & 1;
+    w.carry[id] = flags & 1 ? 1 : flags & 4 ? 2 : 0;
+    w.carrier[id] = flags & 8 ? 1 : 0;
     if (id >= this.workerEnd) this.workerEnd = id + 1;
   }
 
@@ -396,10 +461,12 @@ export class World {
   }
 
   newLocked(cell) {
-    const info = this.lockInfo.get(cell) || { helper: false, time: 0, name: "", n: 0, from: null };
+    const info = this.lockInfo.get(cell) || { helper: false, owner: 0, time: 0, name: "", n: 0, from: null };
+    this.lockInfo.delete(cell);
     return {
       cell,
       n: info.n,
+      owner: info.owner,
       river: this.grid.river(cell),
       row: this.grid.riverRow(cell),
       x: this.grid.x(cell),
@@ -442,7 +509,7 @@ export class World {
   // Takes the news: see `this.news`.
   takeNews() {
     const news = this.news;
-    this.news = { locks: [], workers: 0, food: 0 };
+    this.news = { locks: [], workers: 0, food: 0, nest: false };
     return news;
   }
 
@@ -467,11 +534,13 @@ export class World {
     // The place of the pile that no body can walk to.
     let far = null;
     for (const pile of this.piles.values()) if (pile.far) far = [grid.x(pile.cell), grid.z(pile.cell)];
-    let free = 0;
+    let spare = 0;
+    let carriers = 0;
 
     for (let id = 0; id < this.workerEnd; id++) {
       if (!w.alive[id]) continue;
-      free++;
+      if (w.carrier[id]) carriers++;
+      else spare++;
       const cell = w.cell[id];
       const dx = grid.x(cell) + this.offsetX(id, cell) - w.x[id];
       const dz = grid.z(cell) + this.offsetZ(id, cell) - w.z[id];
@@ -489,9 +558,9 @@ export class World {
         w.still[id] = 0;
       } else {
         w.still[id] += dt;
-        // A worker that waits looks to the pile across the river, and its legs do not
+        // A spare body that waits looks to the pile across the river, and its legs do not
         // stay still: it wants to go across.
-        if (far && !w.carry[id] && w.still[id] > 0.35) {
+        if (far && !w.carrier[id] && w.still[id] > 0.35) {
           w.heading[id] = turnToward(w.heading[id], Math.atan2(far[0] - w.x[id], far[1] - w.z[id]), dt * 5);
           w.phase[id] += dt * (5 + 4 * hash01(id * 3));
         }
@@ -500,7 +569,8 @@ export class World {
       const height = this.heightAt(w.x[id], w.z[id]);
       w.y[id] += (height - w.y[id]) * Math.min(1, dt * 12);
     }
-    this.freeWorkers = free;
+    this.spare = spare;
+    this.carriers = carriers;
 
     for (const [id, player] of this.players) {
       if (id === this.you) continue;
@@ -608,14 +678,20 @@ export class World {
     for (let id = 0; id < this.workerEnd && !hide; id++) {
       if (!w.alive[id] || !sees(w.x[id], w.z[id])) continue;
       const heading = w.heading[id];
-      // A worker that waits moves a little to the front and back.
-      const rock = w.still[id] > 0.35 && !w.carry[id] ? 0.045 * Math.sin(time * (2.6 + hash01(id * 5)) + id) : 0;
-      body(w.x[id] + Math.sin(heading) * rock, w.y[id], w.z[id] + Math.cos(heading) * rock, heading, WORKER_COLOR, w.phase[id], 0, 0, 1, 0);
-      shadow(w.x[id], w.y[id], w.z[id], 0.3);
+      const carrier = w.carrier[id] === 1;
+      // A spare body that waits moves a little to the front and back.
+      const rock = w.still[id] > 0.35 && !carrier ? 0.045 * Math.sin(time * (2.6 + hash01(id * 5)) + id) : 0;
+      const scale = carrier ? CARRIER_SCALE : SPARE_SCALE;
+      body(w.x[id] + Math.sin(heading) * rock, w.y[id], w.z[id] + Math.cos(heading) * rock, heading, carrier ? CARRIER_COLOR : SPARE_COLOR, w.phase[id], 0, 0, scale, 0);
+      shadow(w.x[id], w.y[id], w.z[id], 0.3 * scale);
       if (w.carry[id]) {
-        crumbs[c++] = w.x[id] + Math.sin(heading) * 0.3; crumbs[c++] = w.y[id] + 0.2; crumbs[c++] = w.z[id] + Math.cos(heading) * 0.3; crumbs[c++] = id;
-        crumbs[c++] = 0.1; crumbs[c++] = 0.1; crumbs[c++] = 0.1;
-        crumbs[c++] = FOOD_COLOR[0]; crumbs[c++] = FOOD_COLOR[1]; crumbs[c++] = FOOD_COLOR[2]; crumbs[c++] = 1;
+        // A unit of food, or a white egg, in front of the head.
+        const egg = w.carry[id] === 2;
+        const size = egg ? 0.085 : 0.08;
+        crumbs[c++] = w.x[id] + Math.sin(heading) * 0.3 * scale; crumbs[c++] = w.y[id] + 0.16 * scale + (egg ? 0.03 : 0); crumbs[c++] = w.z[id] + Math.cos(heading) * 0.3 * scale; crumbs[c++] = heading;
+        crumbs[c++] = size; crumbs[c++] = egg ? size * 1.35 : size; crumbs[c++] = size;
+        const color = egg ? EGG_COLOR : FOOD_COLOR;
+        crumbs[c++] = color[0]; crumbs[c++] = color[1]; crumbs[c++] = color[2]; crumbs[c++] = 1;
       }
     }
 
@@ -642,7 +718,7 @@ export class World {
       const since = time - me.arrive;
       const mine = since >= 0;
       const pop = mine && since < 0.3 ? 0.3 * (1 - since / 0.3) : 0;
-      body(me.x + me.slideX, me.y, me.z + me.slideZ, me.heading, mine ? me.color : WORKER_COLOR, me.phase, 0, 0, (mine ? 1.12 : 1) + pop, 0);
+      body(me.x + me.slideX, me.y, me.z + me.slideZ, me.heading, mine ? me.color : SPARE_COLOR, me.phase, 0, 0, 1.12 + pop, 0);
       shadow(me.x + me.slideX, me.y, me.z + me.slideZ, 0.34);
       if (me.carry) load(me.x + me.slideX, me.y, me.z + me.slideZ, me.heading);
     }
@@ -689,19 +765,19 @@ export class World {
 
   // The number of bodies in the world: free workers, players and locked bodies.
   bodyTotal() {
-    return this.freeWorkers + this.players.size + this.locked.size;
+    return this.spare + this.carriers + this.players.size + this.locked.size;
   }
 }
 
-// A move for the server: x u16, z u16, heading u8. A position is (value + 1) * 500.
+// A move for the server: x u16, z u32, heading u8. A position is (value + 1) * 500.
 export function encodeMove(x, z, heading) {
-  const buffer = new ArrayBuffer(5);
+  const buffer = new ArrayBuffer(7);
   const view = new DataView(buffer);
-  const position = (value) => Math.max(0, Math.min(65535, Math.round((value + 1) * 500)));
+  const position = (value, most) => Math.max(0, Math.min(most, Math.round((value + 1) * 500)));
   const turn = Math.round((heading / (2 * Math.PI)) * 256);
-  view.setUint16(0, position(x), true);
-  view.setUint16(2, position(z), true);
-  view.setUint8(4, ((turn % 256) + 256) % 256);
+  view.setUint16(0, position(x, 0xffff), true);
+  view.setUint32(2, position(z, 0xffffffff), true);
+  view.setUint8(6, ((turn % 256) + 256) % 256);
   return buffer;
 }
 
@@ -711,4 +787,4 @@ export function toBase64(buffer) {
   return btoa(text);
 }
 
-export { FOOD_COLOR, hash01 };
+export { FOOD_COLOR, EGG_COLOR, hash01 };

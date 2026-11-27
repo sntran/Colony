@@ -3,7 +3,7 @@ defmodule Colony.HelpersTest do
 
   use ExUnit.Case, async: true
 
-  alias Colony.{Sim, World}
+  alias Colony.{Grid, Sim, World}
 
   @moduletag timeout: 300_000
 
@@ -20,7 +20,7 @@ defmodule Colony.HelpersTest do
   end
 
   test "four helpers and no player complete the four crossings" do
-    world = World.new(Sim.cfg(helpers: 4, workers: 30, seed: 1))
+    world = World.new(Sim.cfg(helpers: 4, spare: 30, seed: 1))
 
     {world, times, locks} =
       Enum.reduce_while(1..12_000, {world, [], []}, fn tick, {world, times, locks} ->
@@ -69,7 +69,7 @@ defmodule Colony.HelpersTest do
   end
 
   test "a helper takes the body of a worker at a lock, as a player does" do
-    world = World.new(Sim.cfg(helpers: 1, workers: 5))
+    world = World.new(Sim.cfg(helpers: 1, spare: 5))
     {world, _} = Sim.run_until(world, 600, &(map_size(&1.locked) == 1))
     assert World.spare(world) == 4
     [{_id, helper}] = Map.to_list(world.players)
@@ -77,44 +77,84 @@ defmodule Colony.HelpersTest do
     assert [{_cell, %{name: "Helper 1", helper: true}}] = Map.to_list(world.locked)
   end
 
-  test "with no spare body, a helper carries food to the nest" do
+  test "a helper obeys the guide: with no spare body, it carries food to the nest" do
     cfg =
       Sim.cfg(
         helpers: 2,
-        workers: 9,
+        spare: 7,
+        carriers: 0,
+        carriers_per_crossing: 0,
         rivers: [{5, 5}, {9, 9}],
-        workers_low: 0,
-        helper_lock_seconds: 4
+        spare_low: 0,
+        helper_lock_seconds: 2
       )
 
     world = World.new(cfg)
 
-    # The helpers use all the spare bodies: 5 for the bridge of river 1, and 4 more.
-    {world, ticks} = Sim.run_until(world, 3000, &(World.spare(&1) == 0 and &1.stage == 2))
-    assert ticks != nil
-    world = %{world | piles: Map.update!(world.piles, 1, &%{&1 | units: 25})}
-
-    # The helpers carry 10 units each time. The nest makes workers from the food.
-    carried = fn world -> world.food_by |> Map.values() |> Enum.sum() end
-    {world, ticks} = Sim.run_until(world, 3000, &(carried.(&1) >= 5))
+    # The helpers make the bridge of river 1. Then the colony has fewer spare bodies than
+    # helpers: after a lock, the guide shows the pile first.
+    {world, ticks} = Sim.run_until(world, 3000, &(&1.stage == 2))
     assert ticks != nil
 
-    assert Enum.all?(world.food_by, fn {{name, helper}, units} ->
-             helper and String.starts_with?(name, "Helper ") and units > 0
+    # The guide shows the pile: the helpers carry 10 units each time. The nest makes spare
+    # bodies from the food, and the helpers lock again.
+    {world, ticks} = Sim.run_until(world, 3000, &(Map.values(&1.helper_food) |> Enum.sum() >= 20))
+    assert ticks != nil
+
+    assert Enum.all?(world.helper_food, fn {name, units} ->
+             String.starts_with?(name, "Helper ") and units > 0
            end)
 
-    assert World.spare(world) >= 1 or map_size(world.locked) > 9
+    locks = map_size(world.locked)
+    {world, ticks} = Sim.run_until(world, 1200, &(map_size(&1.locked) > locks))
+    assert ticks != nil
+  end
+
+  test "a helper with food goes to the nest and never locks with food" do
+    cfg =
+      Sim.cfg(
+        helpers: 3,
+        spare: 8,
+        carriers: 0,
+        rivers: [{5, 5}, {9, 9}],
+        spare_low: 0,
+        helper_lock_seconds: 2
+      )
+
+    world = World.new(cfg)
+
+    Enum.reduce(1..3000, world, fn _, world ->
+      {next, events} = World.tick(world)
+
+      for {_cell, _body, id} <- events.locks do
+        # The body that locked carried no food.
+        assert world.players[id].carry == nil
+      end
+
+      next
+    end)
+  end
+
+  defp lock_by_guide(world, id, tries) when tries > 0 do
+    {:open, cell, stand, _path} = Colony.Guide.target(world, world.players[id])
+    world = Sim.walk(world, id, stand)
+
+    case World.lock(world, id, cell) do
+      {:ok, world} -> world
+      _ -> lock_by_guide(Sim.run(world, 1), id, tries - 1)
+    end
   end
 
   test "helpers build with a player: a bridge has the names of the two" do
-    cfg = Sim.cfg(helpers: 3, workers: 30, rivers: [{7, 7}, {9, 9}])
+    cfg = Sim.cfg(helpers: 3, spare: 30, rivers: [{7, 7}, {9, 9}])
     {world, id} = World.join(World.new(cfg), "Dara")
-    world = Sim.lock!(world, id, Sim.river_cell(world, 1, world.piles[1].col))
+    # Dara follows the guide to an open cell and locks. A helper can get the cell first:
+    # then Dara follows the guide again.
+    world = lock_by_guide(world, id, 10)
     {world, ticks} = Sim.run_until(world, 1200, &(&1.records != []))
     assert ticks != nil
     [record] = world.records
-    assert %{name: "Dara", helper: false, bodies: 1, food: 0} in record.names
+    assert Enum.any?(record.names, &(&1.name == "Dara" and not &1.helper and &1.bodies == 1))
     assert Enum.any?(record.names, & &1.helper)
-    assert record.bodies == 7
   end
 end

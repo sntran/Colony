@@ -15,7 +15,8 @@ defmodule ColonyWeb.ChannelTest do
     changes = [
       save_file: Path.join(dir, "world.bin"),
       seed: 1,
-      workers: Map.get(context, :workers, 30)
+      carriers: 12,
+      spare: Map.get(context, :spare, 10)
     ]
 
     Application.put_env(:colony, :game, Keyword.merge(game, changes))
@@ -103,9 +104,10 @@ defmodule ColonyWeb.ChannelTest do
     assert_reply(ref, :ok, %{x: x, z: z, worker: worker}, 1000)
     assert is_float(x) and is_float(z) and is_integer(worker)
 
+    # A spare body can walk on the new body at once: the count of walks can be more than 0.
     ref = push(socket, "body", %{"cell" => cell})
-    assert_reply(ref, :ok, %{name: "Ada", helper: false, crossings: 0, time: time})
-    assert is_integer(time)
+    assert_reply(ref, :ok, %{name: "Ada", helper: false, crossings: crossings, time: time})
+    assert is_integer(time) and is_integer(crossings)
 
     ref = push(socket, "body", %{"cell" => cell + 1})
     assert_reply(ref, :error)
@@ -119,9 +121,7 @@ defmodule ColonyWeb.ChannelTest do
     })
   end
 
-  test "a player gets a new name: the next body has it, and the old body keeps its name", %{
-    socket: socket
-  } do
+  test "a player gets a new name: all the bodies of the person get it", %{socket: socket} do
     cell = move_to_river(socket)
     ref = push(socket, "lock", %{"cell" => cell})
     assert_reply(ref, :ok, %{worker: _}, 1000)
@@ -131,17 +131,22 @@ defmodule ColonyWeb.ChannelTest do
     ref = push(socket, "name", %{"name" => 5})
     assert_reply(ref, :error)
 
-    ref = push(socket, "body", %{"cell" => cell})
-    assert_reply(ref, :ok, %{name: "Ada"})
     # The name is plain text of 16 characters or fewer.
+    ref = push(socket, "body", %{"cell" => cell})
+    assert_reply(ref, :ok, %{name: "Brisk bFernb 12"})
     assert %{players: 1} = Colony.Server.stats()
     ref = push(socket, "story", %{})
-    assert_reply(ref, :ok, %{names: [%{name: "Ada", bodies: 1}]})
+    assert_reply(ref, :ok, %{names: [%{name: "Brisk bFernb 12", bodies: 1}]})
     world = :sys.get_state(Colony.Server).world
     assert [%{name: "Brisk bFernb 12"}] = Map.values(world.players)
+
+    # The panel of the name: the numbers of the person.
+    ref = push(socket, "me", %{})
+    assert_reply(ref, :ok, %{name: "Brisk bFernb 12", bodies: 1, food: 0, walks: walks})
+    assert is_integer(walks)
   end
 
-  @tag workers: 0
+  @tag spare: 0
   test "with no spare body, the lock gets the reply error", %{socket: socket} do
     cell = move_to_river(socket)
     ref = push(socket, "lock", %{"cell" => cell})
@@ -158,8 +163,8 @@ defmodule ColonyWeb.ChannelTest do
     assert_push(
       "s",
       {:binary,
-       <<_tick::32, 1, 1::16-little, 60::16-little, 96, _nest::16, _seed::32, 0xFFFF::16-little,
-         _rest::binary>>}
+       <<_tick::32, 1, 1::16-little, 60::16-little, _rows::16-little, _seed::32, 0xFFFF::16-little,
+         0::16-little, _rest::binary>>}
     )
 
     ref = push(socket, "lock", %{"cell" => 870})

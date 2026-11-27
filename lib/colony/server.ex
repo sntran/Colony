@@ -18,8 +18,12 @@ defmodule Colony.Server do
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
-  @doc "A client joins. Returns `{:ok, id, snapshot}`. A client that only looks gets no body."
-  def join(pid, name, look?), do: GenServer.call(__MODULE__, {:join, pid, name, look?})
+  @doc """
+  A client joins. Returns `{:ok, id, snapshot}`. A client that only looks gets no body.
+  `secret` is the secret number of the page, or nil.
+  """
+  def join(pid, name, look?, secret \\ nil),
+    do: GenServer.call(__MODULE__, {:join, pid, name, look?, secret})
 
   @doc "A player tells where the body is."
   def move(id, binary), do: GenServer.cast(__MODULE__, {:move, id, binary})
@@ -33,6 +37,9 @@ defmodule Colony.Server do
 
   @doc "A player gets a new name."
   def rename(id, name), do: GenServer.cast(__MODULE__, {:rename, id, name})
+
+  @doc "The numbers of the person of a player: bodies, food and walks."
+  def numbers(id), do: GenServer.call(__MODULE__, {:numbers, id})
 
   @doc "The data of a locked body: name, time, and the number of bodies that went on it. Or nil."
   def body(cell), do: GenServer.call(__MODULE__, {:body, cell})
@@ -93,14 +100,14 @@ defmodule Colony.Server do
   end
 
   @impl true
-  def handle_call({:join, pid, name, look?}, _from, state) do
+  def handle_call({:join, pid, name, look?, secret}, _from, state) do
     reference = Process.monitor(pid)
 
     if look? do
       state = put_in(state.clients[pid], {reference, :look})
       {:reply, {:ok, 0xFFFF, Protocol.snapshot(state.world, 0xFFFF)}, state}
     else
-      {world, id} = World.join(state.world, name)
+      {world, id} = World.join(state.world, name, secret)
 
       state = %{
         state
@@ -140,6 +147,16 @@ defmodule Colony.Server do
     {:reply, Enum.map(state.world.records, &Protocol.record/1), state}
   end
 
+  def handle_call({:numbers, id}, _from, state) do
+    reply =
+      case state.world.players do
+        %{^id => %{person: person}} when person != nil -> World.person_numbers(state.world, person)
+        _ -> nil
+      end
+
+    {:reply, reply, state}
+  end
+
   def handle_call(:story, _from, state) do
     {:reply, World.story(state.world), state}
   end
@@ -148,7 +165,8 @@ defmodule Colony.Server do
     stats = %{
       tick_times: Enum.sort(state.times),
       tick: state.world.tick,
-      free_workers: map_size(state.world.workers),
+      spare: World.spare(state.world),
+      carriers: World.carriers(state.world),
       locked: map_size(state.world.locked),
       players: Enum.count(state.world.players, fn {_id, player} -> player.helper == nil end),
       helpers: Enum.count(state.world.players, fn {_id, player} -> player.helper != nil end),
@@ -180,26 +198,12 @@ defmodule Colony.Server do
 
   @impl true
   def handle_info(:tick, state) do
-    start = System.monotonic_time(:microsecond)
-    {world, events} = World.tick(state.world, System.os_time(:second))
-
-    for {id, message} <- Enum.reverse(events.you), pid = state.pids[id] do
-      send(pid, {:you, message})
+    # With no person in the world, the world does not change: no tick.
+    if World.persons(state.world) == 0 do
+      {:noreply, schedule(state)}
+    else
+      {:noreply, schedule(run_tick(state))}
     end
-
-    if state.clients != %{} do
-      ColonyWeb.Endpoint.broadcast(@topic, "t", {:binary, Protocol.tick(world, events)})
-
-      for record <- Enum.reverse(events.records) do
-        ColonyWeb.Endpoint.broadcast(@topic, "record", Protocol.record(record))
-      end
-    end
-
-    if rem(world.tick, state.save_ticks) == 0, do: save_later(state.path, world)
-
-    time = System.monotonic_time(:microsecond) - start
-    state = keep_time(%{state | world: world}, time)
-    {:noreply, schedule(state)}
   end
 
   def handle_info({:DOWN, _reference, :process, pid, _reason}, state) do
@@ -218,11 +222,35 @@ defmodule Colony.Server do
             world: World.leave(state.world, id)
         }
 
+        # The world stops when the last person goes. It is saved now.
+        if World.persons(state.world) == 0, do: save_later(state.path, state.world)
         {:noreply, state}
     end
   end
 
   def handle_info(_message, state), do: {:noreply, state}
+
+  defp run_tick(state) do
+    start = System.monotonic_time(:microsecond)
+    {world, events} = World.tick(state.world, System.os_time(:second))
+
+    for {id, message} <- Enum.reverse(events.you), pid = state.pids[id] do
+      send(pid, {:you, message})
+    end
+
+    if state.clients != %{} do
+      ColonyWeb.Endpoint.broadcast(@topic, "t", {:binary, Protocol.tick(world, events)})
+
+      for record <- Enum.reverse(events.records) do
+        ColonyWeb.Endpoint.broadcast(@topic, "record", Protocol.record(record))
+      end
+    end
+
+    if rem(world.tick, state.save_ticks) == 0, do: save_later(state.path, world)
+
+    time = System.monotonic_time(:microsecond) - start
+    keep_time(%{state | world: world}, time)
+  end
 
   @impl true
   def terminate(_reason, state) do

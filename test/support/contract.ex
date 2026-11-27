@@ -49,7 +49,8 @@ defmodule Colony.Contract do
       bank_support: div(number.("Bank"), scale),
       row_max: length(costs),
       nest: {div(nest, width), rem(nest, width)},
-      workers: number.("Workers"),
+      spare: number.("Workers"),
+      carriers: 0,
       seed: 1
     )
     |> Keyword.merge(changes)
@@ -105,8 +106,10 @@ defmodule Colony.Contract do
         Costs <- TheCosts
         StartCols = {#{start}}
         Players = {}
-        Nest = #{grid.nest}
+        Nest = #{world.nest}
         Workers = 200
+        Carriers = 150
+        MaxCarriers = 150
         MaxSpare = 200
     SPECIFICATION Spec
     #{lines}
@@ -181,7 +184,7 @@ defmodule Colony.Contract.Server do
   def handle_call({:where, name}, _from, state) do
     reply =
       case player(state, name) do
-        nil -> {:out, state.world.grid.nest}
+        nil -> {:out, state.world.nest}
         %{cell: cell} -> {:alive, cell}
       end
 
@@ -247,12 +250,25 @@ defmodule Colony.Contract.Server do
 
   defp run(state, ticks) do
     Enum.reduce(1..ticks//1, state, fn _, state ->
+      carrying =
+        for {name, id} <- state.ids, into: %{}, do: {name, state.world.players[id].carry != nil}
+
       {world, events} = World.tick(state.world)
       state = %{state | world: world}
 
-      # A new worker has the flag 2. The contract gets the new workers first: a helper
-      # that locks in this tick can use one of them.
+      # The food of the players: taken at a pile, or given to the nest.
+      food =
+        for {name, before} <- carrying,
+            now = world.players[state.ids[name]].carry != nil,
+            now != before do
+          if now, do: {:food_taken, name}, else: {:food_given, name}
+        end
+
+      # A new spare body has the flag 2. The contract gets the new spare bodies first: a
+      # helper that locks in this tick can use one of them. A new carrier has the flags 2
+      # and 8.
       made = for {_id, _cell, 2} <- events.worker_set, do: {:worker_made}
+      carriers = for {_id, _cell, 10} <- events.worker_set, do: {:carrier_made}
 
       # A body that a player took can lock again after some ticks.
       rested =
@@ -268,7 +284,9 @@ defmodule Colony.Contract.Server do
       resting =
         Enum.reduce(rested, state.resting, fn {:rested, name}, set -> MapSet.delete(set, name) end)
 
-      Enum.reduce(made ++ rested ++ locks, %{state | resting: resting}, fn message, state ->
+      messages = food ++ made ++ rested ++ locks ++ carriers
+
+      Enum.reduce(messages, %{state | resting: resting}, fn message, state ->
         if state.monitor, do: Monitor.event(state.monitor, message)
         %{state | events: Map.update(state.events, elem(message, 0), 1, &(&1 + 1))}
       end)

@@ -332,7 +332,7 @@ export class Renderer {
     for (const [name, mesh] of [
       ["shadows", "disc"], ["crumbs", "blob"], ["rings", "ring"], ["cells", "cell"], ["open", "ring"],
       ["food", "blob"], ["beam", "beam"], ["holes", "disc"], ["decks", "cell"], ["ripples", "circle"],
-      ["lights", "blob"],
+      ["lights", "blob"], ["guide", "ring"], ["nests", "blob"],
     ]) {
       this.list(name, this.meshes[mesh], MESH_STRIDE);
     }
@@ -586,11 +586,11 @@ export class Renderer {
       const tone = 0.95 + random() * 0.4;
       add(blob, x, height(x, z) + size * 0.2, z, random() * 6.28, size * (0.8 + random() * 0.5), size * (0.5 + random() * 0.3), size, rock.map((part) => part * tone), 0);
     }
-    // The nest: a ring of earth around a dark hole.
+    // The ring of earth of a nest: the places and the sizes of its pieces.
+    this.nestRing = [];
     for (let i = 0; i < 13; i++) {
       const angle = (i / 13) * 6.283;
-      const size = 0.2 + random() * 0.1;
-      add(blob, nest[0] + Math.cos(angle) * 0.62, 0.02, nest[1] + Math.sin(angle) * 0.62, random() * 6.28, size * 1.25, size * 0.8, size * 1.1, [0.46 + random() * 0.06, 0.33, 0.2], 0);
+      this.nestRing.push([Math.cos(angle) * 0.62, Math.sin(angle) * 0.62, random() * 6.28, 0.2 + random() * 0.1, random() * 0.06]);
     }
     this.setScenery(new Float32Array(vertices), new Uint32Array(indices));
 
@@ -608,12 +608,15 @@ export class Renderer {
     this.nestPieces = heap(60, 0.5, 0.45);
   }
 
-  // The piles of food, the light above each pile, and the food at the nest.
+  // The piles of food, the light above each pile, the nest with its food, and the old
+  // nests. The nest moves at each crossing.
   setFood(world) {
     const grid = world.grid;
     const data = [];
     const beams = [];
-    const holes = [this.nest[0], 0.035, this.nest[1], 0, 0.52, 1, 0.52, 0.07, 0.05, 0.04, 0.92];
+    const nest = [grid.x(world.nest), grid.z(world.nest)];
+    this.nest = nest;
+    const holes = [nest[0], 0.035, nest[1], 0, 0.52, 1, 0.52, 0.07, 0.05, 0.04, 0.92];
     const add = (pieces, count, x, z, size) => {
       for (let i = 0; i < count; i++) {
         const [px, py, pz, turn, scale] = pieces[i];
@@ -622,18 +625,36 @@ export class Renderer {
       }
     };
     for (const pile of world.piles.values()) {
+      if (pile.units === 0) continue;
       const x = grid.x(pile.cell);
       const z = grid.z(pile.cell);
       add(this.pilePieces, Math.min(this.pilePieces.length, Math.ceil(pile.units / 6)), x, z, 0.21);
       // The light of a pile. The pile that no body can walk to has the tallest light.
       // The light of a new pile appears some seconds after the crossing, and it grows.
       const shown = Math.max(0, Math.min(1, (world.time - pile.born - PILE_LIGHT_DELAY) / 1.4));
-      if (pile.units > 0 && shown > 0) beams.push(x, 0.2, z, 0.6, 0.36, (pile.far ? 11 : 5) * shown, 0.36, 1.0, 0.82, 0.4, (pile.far ? 0.4 : 0.2) * shown);
+      if (shown > 0) beams.push(x, 0.2, z, 0.6, 0.36, (pile.far ? 11 : 5) * shown, 0.36, 1.0, 0.82, 0.4, (pile.far ? 0.4 : 0.2) * shown);
       holes.push(x, 0.02, z, 0, 1.25, 1, 1.25, 0, 0, 0, 0.22);
     }
-    add(this.nestPieces, Math.min(this.nestPieces.length, Math.ceil(world.foodNest / 4)), this.nest[0] - 1.15, this.nest[1] + 0.25, 0.11);
+    add(this.nestPieces, Math.min(this.nestPieces.length, Math.ceil(world.foodNest / 4)), nest[0] - 1.15, nest[1] + 0.25, 0.11);
     this.fill("food", new Float32Array(data), data.length / MESH_STRIDE);
     this.fill("beam", new Float32Array(beams), beams.length / MESH_STRIDE);
+
+    // The ring of earth of the nest. An old nest is a lower ring with an empty hole.
+    const ring = [];
+    const earth = (x, z, low) => {
+      for (const [px, pz, turn, size, tone] of this.nestRing) {
+        const s = size * (low ? 0.75 : 1);
+        ring.push(x + px * (low ? 0.9 : 1), 0.02, z + pz * (low ? 0.9 : 1), turn, s * 1.25, s * (low ? 0.45 : 0.8), s * 1.1, (low ? 0.36 : 0.46) + tone, low ? 0.29 : 0.33, low ? 0.2 : 0.2, 1);
+      }
+    };
+    earth(nest[0], nest[1], false);
+    for (const old of world.oldNests) {
+      const x = grid.x(old.cell);
+      const z = grid.z(old.cell);
+      earth(x, z, true);
+      holes.push(x, 0.03, z, 0, 0.42, 1, 0.42, 0.12, 0.09, 0.07, 0.6);
+    }
+    this.fill("nests", new Float32Array(ring), ring.length / MESH_STRIDE);
     // The dark hole of the nest and the shadow of each pile.
     this.fill("holes", new Float32Array(holes), holes.length / MESH_STRIDE);
   }
@@ -763,6 +784,7 @@ export class Renderer {
     gl.uniform1i(this.shape.uniforms.uMode, 0);
     gl.bindVertexArray(this.sceneryVao);
     gl.drawElements(gl.TRIANGLES, this.scenery.count, this.scenery.type, 0);
+    instances("nests");
     gl.uniform1i(this.shape.uniforms.uMode, 3);
     instances("food");
     instances("crumbs");
@@ -792,6 +814,7 @@ export class Renderer {
     // The marks of the open cells, the cell for a lock, and the lights.
     instances("cells");
     instances("rings");
+    instances("guide");
     gl.uniform1i(this.shape.uniforms.uMode, 4);
     instances("open");
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE);

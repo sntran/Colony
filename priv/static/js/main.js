@@ -142,6 +142,12 @@ function nameItem(entry) {
   return item;
 }
 
+function small(text) {
+  const element = document.createElement("small");
+  element.textContent = text;
+  return element;
+}
+
 function recordElement(record) {
   const element = document.createElement("div");
   element.className = "record";
@@ -153,7 +159,8 @@ function recordElement(record) {
   river.className = "river";
   river.append(sign("river"), `${record.id}`);
   const bodies = document.createElement("span");
-  bodies.append(`${record.bodies}`, sign("body"));
+  // The bodies of the bridge, and the bodies of the best bridge for its widest column.
+  bodies.append(`${record.bodies}`, ...(record.best ? [small(`/ ${record.best}`)] : []), sign("body"));
   const time = document.createElement("span");
   time.append(`${record.seconds}`, sign("clock"));
   // The food that was left in the pile at the crossing, of the food at its start.
@@ -239,11 +246,12 @@ const input = new Input(
   {
     lock() {
       if (look || story.running) return;
-      const button = $("lock");
-      button.classList.add("tap");
-      setTimeout(() => button.classList.remove("tap"), 90);
+      const element = $("lock");
+      element.classList.add("tap");
+      setTimeout(() => element.classList.remove("tap"), 90);
       player.lock(performance.now(), () => performance.now()).then((result) => {
         if (result === "spare") noSpare();
+        else if (result === "carry") again($("lock"), "no");
         else if (result) locked(result);
       });
     },
@@ -387,6 +395,7 @@ function takeNews(now) {
 // The marks: the open cells, the cell for a lock, and the body of this player
 
 const rings = new Float32Array(MESH_STRIDE * 4);
+const guideMarks = new Float32Array(MESH_STRIDE * 2);
 const cells = new Float32Array(MESH_STRIDE * 2);
 let openMarks = new Float32Array(MESH_STRIDE * 64);
 
@@ -394,39 +403,90 @@ function put(list, index, x, y, z, turn, size, color, alpha) {
   list.set([x, y, z, turn, size, 1, size, color[0], color[1], color[2], alpha], index * MESH_STRIDE);
 }
 
+// The state of the button: the first state that applies.
+//   "food": I carry food. "none": the colony has no spare body. "rest": my new body rests.
+//   "lock": a lock is possible. "wait": the guide has no target. "dim": my cell does not
+//   touch an open cell.
+let button = "dim";
+
+function buttonState(now) {
+  if (look || story.running) return "dim";
+  return player.button(now);
+}
+
+const BUTTON_SIGNS = {
+  food: SIGNS.food,
+  none: `${SIGNS.body}<b>0</b>`,
+  rest: `<svg viewBox="0 0 40 40"><circle cx="20" cy="20" r="16" fill="none" stroke="rgba(255,255,255,0.25)" stroke-width="5"/><circle id="restRing" cx="20" cy="20" r="16" fill="none" stroke="#fff" stroke-width="5" stroke-linecap="round" stroke-dasharray="100.5" stroke-dashoffset="100.5" transform="rotate(-90 20 20)"/></svg>`,
+  lock: SIGNS.lock,
+  wait: SIGNS.wait,
+  dim: SIGNS.lock,
+};
+
+function showButton(now) {
+  const state = buttonState(now);
+  const element = $("lock");
+  if (state !== button) {
+    button = state;
+    element.className = `state-${state}`;
+    element.innerHTML = BUTTON_SIGNS[state];
+  }
+  if (state === "rest") {
+    // The ring fills in 1 second.
+    const part = Math.max(0, Math.min(1, 1 - (player.restUntil - now) / 1000));
+    const ring = document.getElementById("restRing");
+    if (ring) ring.setAttribute("stroke-dashoffset", `${100.5 * (1 - part)}`);
+  }
+}
+
 function markCells(time, now) {
   const grid = world.grid;
   let ringCount = 0;
   let cellCount = 0;
   let openCount = 0;
+  let guideCount = 0;
   const marks = !story.running;
 
-  // Each open cell on the screen has a bright edge that moves slowly, all the time.
+  // Each open cell on the screen has an edge that moves slowly, all the time. In the
+  // "wider" phase, the cells with the largest gain are bright and the others are weak.
+  // With no spare body, all the edges are weak and grey.
   if (world.open.size * MESH_STRIDE > openMarks.length) openMarks = new Float32Array(world.open.size * MESH_STRIDE * 2);
-  const spare = world.freeWorkers > 0;
-  for (const cell of marks ? world.open : []) {
+  const spare = world.spare > 0;
+  for (const [cell, gain] of marks ? world.open : []) {
     const x = grid.x(cell);
     const z = grid.z(cell);
     if (!renderer.sees(x, z)) continue;
-    // With no spare body, a lock is not possible: the edge is weak.
-    put(openMarks, openCount++, x, 0.03, z, 0, 1, [1, 0.86, 0.35], spare ? 0.95 : 0.35);
+    if (!spare) put(openMarks, openCount++, x, 0.03, z, 0, 1, [0.78, 0.8, 0.8], 0.3);
+    else if (gain >= world.openBest) put(openMarks, openCount++, x, 0.03, z, 0, 1, [1, 0.86, 0.35], 0.95);
+    else put(openMarks, openCount++, x, 0.03, z, 0, 0.92, [1, 0.9, 0.6], 0.32);
   }
 
   if (me.alive && marks) {
     // A ring on the ground shows the body of this player between the workers.
     if (time >= me.arrive) put(rings, ringCount++, me.x, me.y + 0.04, me.z, time * 0.8, 0.82, [1, 1, 1], 0.55);
     const target = player.target;
-    if (target >= 0 && spare) {
+    if (target >= 0 && spare && !me.carry) {
       const pulse = 0.5 + 0.5 * Math.sin(time * 6);
       const ready = player.ready(now);
       put(cells, cellCount++, grid.x(target), 0.025, grid.z(target), 0, 1, [1, 0.86, 0.3], ready ? 0.4 + 0.25 * pulse : 0.2);
       put(rings, ringCount++, grid.x(target), 0.035, grid.z(target), 0, 1, [1, 1, 0.9], ready ? 1 : 0.5);
     }
+    // The mark of the guide: a ring in my color that moves, on the target.
+    const guide = player.current;
+    if (guide && time >= me.arrive) {
+      const x = grid.x(guide.cell);
+      const z = grid.z(guide.cell);
+      const size = guide.kind === "open" ? 1.05 : 1.5;
+      const beat = 0.5 + 0.5 * Math.sin(time * 4.5);
+      put(guideMarks, guideCount++, x, 0.06, z, time * 1.3, size * (1 + 0.12 * beat), me.color, 0.95);
+      put(guideMarks, guideCount++, x, 0.06, z, -time * 0.9, size * (1.32 + 0.1 * beat), me.color, 0.45);
+    }
   }
   renderer.fill("open", openMarks, openCount);
   renderer.fill("rings", rings, ringCount);
   renderer.fill("cells", cells, cellCount);
-  $("lock").classList.toggle("ready", marks && player.ready(now));
+  renderer.fill("guide", guideMarks, guideCount);
+  showButton(now);
 }
 
 // ---------------------------------------------------------------------------
@@ -504,7 +564,7 @@ function moveCamera(dt, time) {
 let arrow = null;
 
 function moveArrow() {
-  arrow = showing || story.running ? null : guide.arrow(me, (x, y, z) => renderer.project(x, y, z), canvas.clientWidth, canvas.clientHeight);
+  arrow = showing || story.running || !me.alive || world.time < me.arrive ? null : guide.arrow(me, player.current, (x, y, z) => renderer.project(x, y, z), canvas.clientWidth, canvas.clientHeight);
   const element = $("arrow");
   element.hidden = !arrow;
   if (arrow) {
@@ -566,6 +626,14 @@ function drawLabels(now) {
     text(element.lastChild, `${pile.units}`);
   }
 
+  // An old nest is a mark with the number of its land.
+  for (const old of world.oldNests) {
+    const element = label(`n${old.cell}`, "oldnest", grid.x(old.cell), 0.4, grid.z(old.cell));
+    if (!element) continue;
+    if (!element.firstChild) element.append(sign("nest"), document.createElement("span"));
+    text(element.lastChild, `${old.land}`);
+  }
+
   // The name of a body that locked a moment before, for 2 seconds.
   lockNames = lockNames.filter((entry) => entry.until > now);
   for (const entry of story.running ? [] : lockNames) {
@@ -623,7 +691,7 @@ let shownSpare = -1;
 let shownFood = -1;
 
 function drawCounts() {
-  const spare = world.freeWorkers;
+  const spare = world.spare;
   if (spare !== shownSpare) {
     // The number moves a little when a lock uses a spare body.
     if (spare < shownSpare) again($("spare"), "used");
@@ -842,10 +910,12 @@ window.colony = {
     });
     return { data, names: story.pictureNames, date: story.pictureDate };
   },
-  // What a person sees: the button, the body, the open cells on the screen and the arrow.
+  // What a person sees: the button, the body, the mark of the guide and the arrow.
   view() {
-    if (!world.ready) return { lock: false, me: null, open: [], arrow: null };
-    const ready = $("lock").classList.contains("ready");
-    return guide.view(me, ready, arrow, (x, y, z) => renderer.project(x, y, z), canvas.clientWidth, canvas.clientHeight);
+    if (!world.ready) return { lock: false, button: "dim", me: null, mark: null, arrow: null };
+    // The mark shows only when the light of a lock got to the new body.
+    const guideNow = world.time >= me.arrive ? player.current : null;
+    return guide.view(me, button, guideNow, arrow, (x, y, z) => renderer.project(x, y, z), canvas.clientWidth, canvas.clientHeight);
   },
+  button: () => button,
 };

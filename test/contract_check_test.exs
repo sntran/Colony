@@ -102,11 +102,22 @@ defmodule Colony.ContractCheckTest do
       {machine, state}
     end
 
-    defp step!(machine, state, action, args) do
-      assert {:ok, [{next, nil}]} = Machine.step(machine, state, action, args),
-             "the contract does not permit #{action}(#{inspect(args)})"
+    # One step of the contract. At a crossing the contract permits each cell of the near
+    # bank for the nest: the next state is the state with the nest of the real world.
+    defp step!(machine, state, action, args, nest) do
+      assert {:ok, nexts} = Machine.step(machine, state, action, args)
+      assert nexts != [], "the contract does not permit #{action}(#{inspect(args)})"
 
-      next
+      case nexts do
+        [{next, nil}] ->
+          next
+
+        many ->
+          {next, nil} =
+            Enum.find(many, fn {next, _} -> Machine.to_map(machine, next)["nest"] == nest end)
+
+          next
+      end
     end
 
     defp bodies(machine, state) do
@@ -115,7 +126,7 @@ defmodule Colony.ContractCheckTest do
 
     @tag :tmp_dir
     test "the contract and the server have the same open cells on river 1", %{tmp_dir: dir} do
-      {world, id} = World.join(World.new(Sim.cfg(seed: 3, workers: 30)), "Tester")
+      {world, id} = World.join(World.new(Sim.cfg(seed: 3, spare: 30)), "Tester")
       {machine, state} = plan_machine(world, dir, 1, "")
 
       # The player takes the highest open cell each time. The contract permits each lock.
@@ -124,7 +135,7 @@ defmodule Colony.ContractCheckTest do
           if world.stage > 1 do
             {:halt, {world, state}}
           else
-            cell = Enum.max(world.open)
+            cell = world.open |> Map.keys() |> Enum.max()
             # A cell that is not open is not a step of the contract.
             closed =
               Enum.find(Colony.Grid.neighbors(world.grid, cell), fn other ->
@@ -139,7 +150,8 @@ defmodule Colony.ContractCheckTest do
                      )
             end
 
-            {:cont, {Sim.lock!(world, id, cell), step!(machine, state, "HelperLocked", [cell])}}
+            world = Sim.lock!(world, id, cell)
+            {:cont, {world, step!(machine, state, "HelperLocked", [cell], world.nest)}}
           end
         end)
 
@@ -149,7 +161,7 @@ defmodule Colony.ContractCheckTest do
 
     @tag :tmp_dir
     test "4 helpers on the grid of the game obey the contract of a bridge", %{tmp_dir: dir} do
-      world = World.new(Sim.cfg(helpers: 4, workers: 30, seed: 2, helper_lock_seconds: 4))
+      world = World.new(Sim.cfg(helpers: 4, spare: 30, seed: 2, helper_lock_seconds: 4))
       first = plan_machine(world, dir, 1, "INVARIANT AllSupported\n")
 
       # The helpers build the bridges of river 1 and of river 2. Each lock must be a step
@@ -168,7 +180,7 @@ defmodule Colony.ContractCheckTest do
               {machine, state} =
                 machines[k] || plan_machine(world, dir, k, "INVARIANT AllSupported\n")
 
-              next = step!(machine, state, "HelperLocked", [cell])
+              next = step!(machine, state, "HelperLocked", [cell], world.nest)
               assert Machine.check_invariants(machine, next) == :ok
               {Map.put(machines, k, {machine, next}), count + 1}
             end)

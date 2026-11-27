@@ -13,6 +13,9 @@ defmodule Colony.Grid do
   river goes across the full width of the grid. The south edge of a river is a straight
   line of cells. The river has a different width in each column, thus its north edge is
   not straight.
+
+  The grid has a number of rivers. A world with no end makes a new grid with more rivers
+  when it needs them: the rivers of one seed are always the same.
   """
 
   @row_step :math.sqrt(3) / 2
@@ -32,8 +35,7 @@ defmodule Colony.Grid do
     :lands,
     :neighbors,
     :forward,
-    :beside,
-    :nest_distance
+    :beside
   ]
 
   @type cell :: non_neg_integer()
@@ -42,17 +44,22 @@ defmodule Colony.Grid do
   @doc "The distance between two rows."
   def row_step, do: @row_step
 
-  @doc "Makes the grid from the game config and the seed of the world."
-  def new(cfg, seed) do
+  @doc """
+  Makes the grid from the game config and the seed of the world, with `count` rivers. With
+  no count, the grid has the rivers of the config, or `rivers_ahead` rivers for a world
+  with no end.
+  """
+  def new(cfg, seed, count \\ nil) do
     width = Keyword.fetch!(cfg, :width)
     near = Keyword.fetch!(cfg, :near_rows)
     land_rows = Keyword.fetch!(cfg, :land_rows)
     {nest_row, nest_col} = Keyword.fetch!(cfg, :nest)
+    count = count || first_count(cfg)
 
     # Each land after a river is `land_rows` deep at the widest place of the river.
     {rivers, rows} =
       cfg
-      |> rivers(seed)
+      |> rivers(seed, count)
       |> Enum.map_reduce(near, fn widths, start ->
         most = Enum.max(widths)
         {%{start: start, widths: List.to_tuple(widths), max: most}, start + most + land_rows}
@@ -100,7 +107,7 @@ defmodule Colony.Grid do
         Enum.filter(list, &(div(&1, width) == div(cell, width)))
       end
 
-    grid = %{
+    %{
       grid
       | kinds: zones |> Enum.map(&elem(&1, 0)) |> List.to_tuple(),
         lands: zones |> Enum.map(&elem(&1, 1)) |> List.to_tuple(),
@@ -108,21 +115,45 @@ defmodule Colony.Grid do
         forward: List.to_tuple(forward),
         beside: List.to_tuple(beside)
     }
+  end
 
-    %{grid | nest_distance: List.to_tuple(for cell <- cells, do: distance(grid, cell, grid.nest))}
+  # The number of rivers of a new grid.
+  defp first_count(cfg) do
+    if Keyword.get(cfg, :endless, false),
+      do: Keyword.fetch!(cfg, :rivers_ahead),
+      else: length(Keyword.fetch!(cfg, :rivers))
+  end
+
+  @doc "True if the world has no end: a grid can get more rivers."
+  def endless?(cfg), do: Keyword.get(cfg, :endless, false)
+
+  @doc """
+  The least and the largest width of river `k`, from the config. In a world with no end,
+  each river after the list has the widths of the last river of the list.
+  """
+  def limits(cfg, k) do
+    list = Keyword.fetch!(cfg, :rivers)
+
+    cond do
+      k <= length(list) -> Enum.at(list, k - 1)
+      endless?(cfg) -> List.last(list)
+      true -> nil
+    end
   end
 
   @doc """
-  The width of each river in each column, from the seed: a list with one list for each river.
+  The width of each river in each column, from the seed: a list with one list for each of
+  the `count` rivers.
 
   The config `rivers` has `{least, most}` for each river. The width changes slowly along a
   river, by 1 row or less from one column to the next. Each river has a place with its
   least width and a place with its largest width.
   """
-  def rivers(cfg, seed) do
+  def rivers(cfg, seed, count \\ nil) do
     width = Keyword.fetch!(cfg, :width)
+    count = count || first_count(cfg)
 
-    for {{low, high}, k} <- Enum.with_index(Keyword.fetch!(cfg, :rivers), 1) do
+    for k <- 1..count//1, {low, high} = limits(cfg, k) do
       if low == high do
         List.duplicate(high, width)
       else
@@ -176,6 +207,9 @@ defmodule Colony.Grid do
   @doc "The first row of river `k`."
   def river_start(%__MODULE__{rivers: rivers}, k), do: elem(rivers, k - 1).start
 
+  @doc "The largest width of river `k`."
+  def river_max(%__MODULE__{rivers: rivers}, k), do: elem(rivers, k - 1).max
+
   @doc "The width of river `k` in a column."
   def river_width(%__MODULE__{rivers: rivers}, k, col), do: elem(elem(rivers, k - 1).widths, col)
 
@@ -198,9 +232,6 @@ defmodule Colony.Grid do
 
   @doc "The cells that touch a cell and are in the same row."
   def beside(%__MODULE__{beside: beside}, cell), do: elem(beside, cell)
-
-  @doc "The number of cells from a cell to the nest. A river is not an obstacle for this number."
-  def nest_distance(%__MODULE__{nest_distance: distances}, cell), do: elem(distances, cell)
 
   @doc "True if a river cell touches a land cell."
   def touches_bank?(%__MODULE__{kinds: kinds} = grid, cell) do

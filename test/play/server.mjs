@@ -5,19 +5,25 @@ import { mkdirSync, rmSync } from "node:fs";
 import path from "node:path";
 
 const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
-const PORT = process.env.PORT || "4000";
-export const BASE = `http://localhost:${PORT}/`;
+let PORT = process.env.PORT || "4000";
+export let BASE = `http://localhost:${PORT}/`;
 
-// options: { workers, helpers, seed, save, keep }. `save` is the path of the save file.
-// With `keep`, the server loads the save file that is there.
+// options: { carriers, spare, helpers, seed, save, keep, port, env }. `save` is the path
+// of the save file. With `keep`, the server loads the save file that is there.
 export async function startServer(options = {}) {
+  if (options.port) {
+    PORT = String(options.port);
+    BASE = `http://localhost:${PORT}/`;
+  }
   const save = options.save || path.join(root, "tmp/play-world.bin");
   mkdirSync(path.dirname(save), { recursive: true });
   if (!options.keep) rmSync(save, { force: true });
   const env = {
     ...process.env,
     PORT,
-    COLONY_WORKERS: String(options.workers ?? 30),
+    ...(options.carriers !== undefined ? { COLONY_CARRIERS: String(options.carriers) } : {}),
+    ...(options.spare !== undefined ? { COLONY_SPARE: String(options.spare) } : {}),
+    ...(options.env || {}),
     COLONY_HELPERS: String(options.helpers ?? 0),
     COLONY_SEED: String(options.seed ?? process.env.COLONY_SEED ?? 2027),
     COLONY_SAVE_FILE: save,
@@ -44,7 +50,9 @@ export async function startServer(options = {}) {
           // The process is not there.
         }
         // The VM can be in a process group of its own.
-        spawnSync("pkill", [`-${name.slice(3)}`, "-f", "phx.server"]);
+        // The VM can be in a process group of its own. Stop the process that has the port:
+        // only the server of this test. Other tests can run at the same time.
+        spawnSync("fuser", ["-k", `-${name.slice(3)}`, `${PORT}/tcp`]);
       };
       signal("SIGTERM");
       const limit = Date.now() + 10000;
