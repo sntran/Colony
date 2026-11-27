@@ -19,6 +19,8 @@ export const SIGNS = {
   clock: svg('<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2.5"/>'),
   // Bodies that went across a body.
   steps: svg('<path d="M4 18 9 13M9 18l5-5M14 18l5-5M15 7l4-1-1 4" />'),
+  // A new random name: two arrows that change places.
+  shuffle: svg('<path d="M3 7h4c4 0 6 10 10 10h4M18 14l3 3-3 3M3 17h4c1.6 0 2.9-1.6 4-3.6M13 9.6c1.1-1.6 2.4-2.6 4-2.6h4M18 4l3 3-3 3"/>'),
   // The story.
   story: svg('<path d="M3 16c2.5-6 15.5-6 18 0"/><path d="M6.5 13v5M10.5 11.6V18M13.5 11.6V18M17.5 13v5"/>'),
   soundOn: svg('<path d="M4 9.5v5h3.5L12 18.5v-13L7.5 9.5z" fill="currentColor"/><path d="M15.5 9a4.5 4.5 0 0 1 0 6M18 6.5a8 8 0 0 1 0 11"/>'),

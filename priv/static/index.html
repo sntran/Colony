@@ -28,6 +28,17 @@
   #swatch { flex: none; width: 12px; height: 12px; border-radius: 50%; }
   button { border-radius: 50%; border: 2px solid rgba(255, 255, 255, 0.6); color: #fff; font: 600 15px system-ui, sans-serif; background: rgba(20, 28, 24, 0.5); touch-action: none; padding: 0; outline: none; -webkit-appearance: none; appearance: none; }
   .tool { border-radius: 12px; border-width: 0; padding: 6px 8px; display: flex; align-items: center; gap: 6px; touch-action: manipulation; }
+  /* The panel of my name. */
+  #panel { position: fixed; left: calc(10px + env(safe-area-inset-left)); top: calc(56px + env(safe-area-inset-top)); z-index: 4; background: rgba(20, 28, 24, 0.86); padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; min-width: 220px; animation: show2 0.25s ease-out; }
+  #panel .row { display: flex; align-items: center; gap: 10px; }
+  #panelSwatch { width: 22px; height: 22px; border-radius: 50%; flex: none; box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.5); }
+  #panelName { font-size: 17px; white-space: nowrap; }
+  #panelNew { margin-left: auto; background: rgba(255, 255, 255, 0.14); }
+  #panel .numbers { gap: 16px; font-weight: 600; font-size: 16px; font-variant-numeric: tabular-nums; }
+  #panel .numbers span { display: flex; align-items: center; gap: 5px; }
+  #panelClose { position: absolute; right: -10px; top: -10px; width: 30px; height: 30px; padding: 3px; border-radius: 50%; background: rgba(20, 28, 24, 0.9); }
+  #panelClose svg { width: 18px; height: 18px; }
+  body.story #panel { display: none !important; }
   #counts { margin-left: auto; display: flex; gap: 12px; align-items: center; font-weight: 600; font-variant-numeric: tabular-nums; }
   #counts span { display: flex; align-items: center; gap: 5px; }
   #spare b, #food b { display: inline-block; min-width: 1.2em; text-align: right; }
@@ -157,6 +168,11 @@
     <span id="spare" data-sign="body"><b id="spareCount">0</b></span>
     <span id="food" data-sign="food"><b id="foodCount">0</b></span>
   </div>
+</div>
+<div id="panel" class="panel" hidden>
+  <div class="row"><i id="panelSwatch"></i><b id="panelName"></b><button id="panelNew" class="tool" type="button" data-sign="shuffle"></button></div>
+  <div class="row numbers"><span data-sign="body"><b id="panelBodies">0</b></span><span data-sign="food"><b id="panelFood">0</b></span><span data-sign="steps"><b id="panelWalks">0</b></span></div>
+  <button id="panelClose" class="tool" type="button" data-sign="close"></button>
 </div>
 <div id="stats" class="panel" hidden></div>
 <div id="card" hidden></div>

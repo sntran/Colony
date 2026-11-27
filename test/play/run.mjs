@@ -52,6 +52,58 @@ const tests = {
     }
   },
 
+  // 4. My bodies: a player locks 5 bodies, takes a new name, and loads the page again. All
+  // 5 bodies have the new name, and the panel shows 5 bodies and the walks.
+  async bodies() {
+    for (const seed of SEEDS) {
+      const server = await startServer({ helpers: 0, seed });
+      const browser = await launch();
+      try {
+        const session = await open(browser);
+        const before = await session.state();
+        await playNew(session, { limit: 240, done: (state) => state.locks >= 5 });
+        // The bodies of my person, as the page sees them.
+        const mine = () =>
+          session.page.evaluate(() => {
+            const { world } = window.colony;
+            return [...world.locked.values()].filter((body) => body.owner === world.person && !body.helper).map((body) => body.name);
+          });
+        const locked = await mine();
+        // A tap on my name opens the panel. The button of the panel gives a new name.
+        await session.tapOn("me");
+        await session.page.waitForFunction(() => !document.getElementById("panel").hidden);
+        await session.tapOn("panelNew");
+        await sleep(800);
+        const name = (await session.state()).name;
+        // The page loads again, with the same local storage.
+        await session.page.reload();
+        await session.page.waitForFunction(() => window.colony && window.colony.world.ready);
+        await sleep(1500);
+        const after = await mine();
+        const again = await session.state();
+        await session.tapOn("me");
+        await session.page.waitForFunction(() => document.getElementById("panelBodies").textContent !== "0", null, { timeout: 5000 }).catch(() => {});
+        await sleep(2500);
+        const panel = await session.page.evaluate(() => ({
+          name: document.getElementById("panelName").textContent,
+          bodies: Number(document.getElementById("panelBodies").textContent),
+          food: Number(document.getElementById("panelFood").textContent),
+          walks: Number(document.getElementById("panelWalks").textContent),
+        }));
+        if (seed === SEEDS[0]) await session.shot(path.join(SHOTS, "name-panel.jpg"));
+        console.log(`  seed ${seed}: ${locked.length} bodies of "${before.name}", new name "${name}", after the load: ${after.length} bodies, the panel ${JSON.stringify(panel)}`);
+        check("bodies", `seed ${seed}: the player locked 5 bodies`, locked.length >= 5, `${locked.length}`);
+        check("bodies", `seed ${seed}: after the load, all the bodies have the new name`, after.length === locked.length && after.every((other) => other === name) && name !== before.name, after.join(", "));
+        check("bodies", `seed ${seed}: the page has the new name after the load`, again.name === name, again.name);
+        check("bodies", `seed ${seed}: the panel shows the bodies and the walks`, panel.name === name && panel.bodies === locked.length && panel.walks >= 0, JSON.stringify(panel));
+        check("bodies", `seed ${seed}: the page has no error`, session.errors.length === 0, session.errors.slice(0, 2).join(" | "));
+      } finally {
+        await browser.close();
+        await server.stop();
+      }
+    }
+  },
+
   // 5. Two browsers: the same records, the same story, and the same marks of the open cells.
   async two() {
     const server = await startServer({ helpers: 0, seed: SEEDS[0] });

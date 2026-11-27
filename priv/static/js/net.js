@@ -6,8 +6,9 @@ import { Socket } from "/vendor/phoenix.mjs";
 
 export class Net {
   // handlers: snapshot(buffer), tick(buffer), you(message), records(list), record(record), status(text)
-  // `look` is true for a client that only looks: it gets no body.
-  constructor(name, look, handlers) {
+  // `look` is true for a client that only looks: it gets no body. `secret` is the secret
+  // number of this page, or null.
+  constructor(name, look, handlers, secret = null) {
     this.handlers = handlers;
     this.bytes = 0;
     this.delay = 0;
@@ -22,7 +23,7 @@ export class Net {
     });
     this.socket.connect();
 
-    this.channel = this.socket.channel("world", look ? { look: true } : { name });
+    this.channel = this.socket.channel("world", look ? { look: true } : secret ? { name, secret } : { name });
     // Each message has about 13 bytes more than its data: the headers of the channel and of
     // the WebSocket frame. The count of bytes includes them.
     this.channel.on("s", (buffer) => {
@@ -45,7 +46,7 @@ export class Net {
       .receive("error", () => handlers.status("wait"));
   }
 
-  // Sends the position of the body. `move` is an ArrayBuffer of 6 bytes.
+  // Sends the position of the body. `move` is an ArrayBuffer of 7 bytes.
   move(buffer) {
     if (this.ready) this.channel.push("m", buffer);
   }
@@ -76,6 +77,11 @@ export class Net {
   // This player has a new name.
   rename(name) {
     return this.ask("name", { name });
+  }
+
+  // The numbers of this person: { name, bodies, food, walks }, or null.
+  me() {
+    return this.ask("me", {});
   }
 
   // The players with their bodies and their food, for the story.

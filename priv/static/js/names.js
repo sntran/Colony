@@ -12,6 +12,28 @@ const SECOND = [
 ];
 
 const KEY = "colony.name";
+const SECRET = "colony.secret";
+
+// The secret random number of this page. The page makes it one time and keeps it in local
+// storage. The server knows the player by it: the same person on each load, also on a
+// later day. Returns null if the browser has no local storage: then the server makes a new
+// person at each load, as before.
+export function mySecret() {
+  try {
+    let secret = localStorage.getItem(SECRET);
+    if (!secret) {
+      const bytes = new Uint8Array(16);
+      crypto.getRandomValues(bytes);
+      secret = [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+      localStorage.setItem(SECRET, secret);
+      // Some browsers accept the write and do not keep the value.
+      if (localStorage.getItem(SECRET) !== secret) return null;
+    }
+    return /^[A-Za-z0-9]{16,64}$/.test(secret) ? secret : null;
+  } catch (_) {
+    return null;
+  }
+}
 
 // The name stays in local storage. If storage is not available, the name is new at each load.
 // The name of this player. It stays the same on this device.

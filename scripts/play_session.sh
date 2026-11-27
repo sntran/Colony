@@ -6,11 +6,13 @@
 #
 # The method is the method of scripts/remote_ssh_runner.sh in sntran/BEAM.com.
 #
-# Environment: MINUTES (60, 120 at most), WORKERS (30), HELPERS (0),
-# PROBE_TRIES (60), and for a test: CLOUDFLARED (a cloudflared that is there
-# already) and BEAM_DIR (a directory that has `mix` already).
+# Environment: MINUTES (60, 120 at most), HELPERS (0), PROBE_TRIES (60), and
+# for a test: CLOUDFLARED (a cloudflared that is there already) and BEAM_DIR
+# (a directory that has `mix` already). The workflow also gives WORKERS. The
+# game does not use it: config/game.exs has the carriers and the spare bodies
+# at the start.
 set -u
-: "${MINUTES:=60}" "${WORKERS:=30}" "${HELPERS:=0}" "${PROBE_TRIES:=60}"
+: "${MINUTES:=60}" "${HELPERS:=0}" "${PROBE_TRIES:=60}"
 [ "$MINUTES" -gt 120 ] && MINUTES=120
 [ "$MINUTES" -lt 1 ] && MINUTES=1
 TMP=${RUNNER_TEMP:-/tmp}
@@ -110,7 +112,7 @@ mix local.hex --force > "$log" 2>&1 || { cat "$log"; exit 1; }
 mix deps.get --only prod >> "$log" 2>&1 || { cat "$log"; exit 1; }
 mix compile >> "$log" 2>&1 || { cat "$log"; exit 1; }
 
-PORT=$PORT COLONY_WORKERS=$WORKERS COLONY_HELPERS=$HELPERS COLONY_SAVE_FILE=$OUT/world.bin \
+PORT=$PORT COLONY_HELPERS=$HELPERS COLONY_SAVE_FILE=$OUT/world.bin \
     mix phx.server >> "$log" 2>&1 &
 server_pid=$!
 if ! wait_for 'Running ColonyWeb.Endpoint' 300 "$log" "$server_pid" > /dev/null; then
@@ -156,10 +158,10 @@ fi
     echo
     echo "**https://$host/?story=1**"
     echo
-    echo "- The session runs for $MINUTES minutes, with $WORKERS workers and $HELPERS helpers at the start."
+    echo "- The session runs for $MINUTES minutes, with $HELPERS helpers. The world stops when no player is in it."
     echo "- At the end, the artifact of this run has the world file, the records of the bridges and the story."
 } >> "$summary"
-echo "play session: https://$host/ for $MINUTES minutes, $WORKERS workers, $HELPERS helpers"
+echo "play session: https://$host/ for $MINUTES minutes, $HELPERS helpers"
 
 # Wait for the end of the session, or for the end of the server or of the tunnel.
 end=$(( $(date +%s) + MINUTES * 60 ))

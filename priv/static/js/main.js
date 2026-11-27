@@ -11,7 +11,7 @@ import { Sound } from "./sound.js";
 import { Story } from "./story.js";
 import { Effects } from "./fx.js";
 import { PLAYER_CAMERA } from "./view.js";
-import { myName, newName, colorOf, cssColor, HELPER_COLOR } from "./names.js";
+import { myName, mySecret, newName, colorOf, cssColor, HELPER_COLOR } from "./names.js";
 import { SIGNS, putSigns, sign } from "./signs.js";
 
 const params = new URLSearchParams(location.search);
@@ -112,7 +112,7 @@ const net = new Net(me.name, look, {
   status(text) {
     $("status").hidden = text === "" && world.ready;
   },
-});
+}, mySecret());
 
 player = new Player(world, guide, {
   move: (buffer) => net.move(buffer),
@@ -140,6 +140,8 @@ function nameItem(entry) {
   who.className = "who";
   who.textContent = entry.name;
   item.append(dot, who, count("body", entry.bodies), count("food", entry.food));
+  // The story shows the walks on the bodies of each player.
+  if (typeof entry.walks === "number") item.append(count("steps", entry.walks));
   return item;
 }
 
@@ -317,13 +319,38 @@ function locked(result) {
   flight = fx.light([grid.x(result.cell), grid.z(result.cell)], result.to, me.color, world.time, 0.4);
 }
 
-// A tap on my name gives a new random name. The name stays on this device.
+// A tap on my name opens the panel of my name: my color, my name with a button for a new
+// random name, my locked bodies, my food, and the walks on my bodies. A second tap closes it.
+let panelTimer = null;
+async function fillPanel() {
+  $("panelSwatch").style.background = cssColor(me.color);
+  $("panelName").textContent = me.name;
+  const numbers = await net.me();
+  if (!numbers || $("panel").hidden) return;
+  $("panelBodies").textContent = `${numbers.bodies}`;
+  $("panelFood").textContent = `${numbers.food}`;
+  $("panelWalks").textContent = `${numbers.walks}`;
+}
+function openPanel(open) {
+  $("panel").hidden = !open;
+  clearInterval(panelTimer);
+  if (!open) return;
+  fillPanel();
+  panelTimer = setInterval(fillPanel, 2000);
+}
 $("me").addEventListener("pointerup", () => {
   if (look) return;
+  openPanel($("panel").hidden);
+});
+$("panelClose").addEventListener("pointerup", () => openPanel(false));
+// The new name stays on this device. The server gives it to all my bodies.
+$("panelNew").addEventListener("pointerup", async () => {
   me.name = newName();
   me.color = colorOf(me.name);
   showName();
-  net.rename(me.name);
+  fillPanel();
+  await net.rename(me.name);
+  fillPanel();
 });
 
 function showSound() {

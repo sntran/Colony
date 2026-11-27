@@ -51,8 +51,8 @@ export class Story {
     return { locks, names: this.names };
   }
 
-  // The players with their bodies and their food. The bodies come from the locks that
-  // the page has. The food comes from the server.
+  // The players with their bodies, their food and the walks on their bodies. The bodies
+  // come from the locks that the page has. The food and the walks come from the server.
   count(info) {
     const players = new Map();
     const key = (name, helper) => `${helper ? 1 : 0}:${name}`;
@@ -65,6 +65,8 @@ export class Story {
       const id = key(entry.name, entry.helper);
       if (!players.has(id)) players.set(id, { name: entry.name, helper: entry.helper, bodies: 0, food: 0 });
       players.get(id).food = entry.food;
+      // The walks on the bodies of the player: the server counts them.
+      players.get(id).walks = entry.walks || 0;
     }
     return [...players.values()].sort((a, b) => b.bodies - a.bodies || b.food - a.food || (a.name < b.name ? -1 : 1));
   }
