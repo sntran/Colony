@@ -11,13 +11,13 @@ defmodule Colony.ContractMonitorTest do
 
   alias Accord.Spec.Monitor
   alias Accord.Test.ViolationCollector
-  alias Colony.Contract
+  alias Colony.{Contract, World}
 
   @moduletag :capture_log
   @players [:p1, :p2]
 
   defp start(changes) do
-    changes = Keyword.merge([workers: 5, helpers: 1, helper_lock_seconds: 3], changes)
+    changes = Keyword.merge([helpers: 1, helper_lock_seconds: 20], changes)
     game = Contract.game_config("specs/ColonyPlay.cfg", changes)
     {:ok, server} = Contract.Server.start_link(game)
     ViolationCollector.init()
@@ -34,10 +34,11 @@ defmodule Colony.ContractMonitorTest do
   end
 
   # Sends one message. Then the monitor compares the world with the contract: the locked
-  # bodies and the body of each player must be the same.
+  # bodies, the number of spare bodies and the body of each player must be the same.
   defp send!(%{monitor: monitor}, message) do
     reply = Monitor.call(monitor, message, 30_000)
     Monitor.call(monitor, :look, 30_000)
+    Monitor.call(monitor, :spare, 30_000)
     for name <- @players, do: Monitor.call(monitor, {:where, name}, 30_000)
 
     case ViolationCollector.drain() do
@@ -57,23 +58,38 @@ defmodule Colony.ContractMonitorTest do
     end
   end
 
-  # Half of the messages are messages that can do something: a move to a cell that
-  # touches the cell of the body, or a lock into a river cell that touches it. The other
-  # messages are fully random: the world must refuse most of them, as the contract says.
+  # Most of the messages are messages that can do something: a move to a cell that
+  # touches the cell of the body, a step to the open cells, or a lock into a river cell
+  # that touches the body. The other messages are fully random: the world must refuse
+  # most of them, as the contract says.
   defp random_message(%{server: server, cells: cells}) do
     world = Contract.Server.world(server)
+    grid = world.grid
     ids = Contract.Server.ids(server)
     name = Enum.random(@players)
     body = ids[name] && world.players[ids[name]]
-    near = if body, do: Colony.Grid.neighbors(world.grid, body.cell), else: Enum.to_list(cells)
-    gap = Enum.filter(near, &(Colony.Grid.kind(world.grid, &1) == :gap))
+    near = if body, do: Colony.Grid.neighbors(grid, body.cell), else: Enum.to_list(cells)
+    gap = Enum.filter(near, &(Colony.Grid.kind(grid, &1) == :gap))
+    open = Enum.filter(near, &World.open?(world, &1))
+
+    # The first cell of the way to a cell that touches an open cell.
+    step =
+      if body do
+        world.open
+        |> Enum.flat_map(&Colony.Grid.neighbors(grid, &1))
+        |> Enum.filter(&World.walkable?(world, &1))
+        |> Enum.map(&Colony.Sim.path(world, body.cell, &1))
+        |> Enum.reject(&(&1 in [nil, []]))
+        |> Enum.min_by(&length/1, fn -> nil end)
+      end
 
     case :rand.uniform(100) do
+      n when n <= 20 and step != nil -> {:move, name, hd(step)}
       n when n <= 34 -> {:move, name, Enum.random(near)}
-      n when n <= 44 -> {:move, name, Enum.random(cells)}
+      n when n <= 42 -> {:move, name, Enum.random(cells)}
+      n when n <= 54 and open != [] -> {:lock, name, Enum.random(open)}
       n when n <= 62 and gap != [] -> {:lock, name, Enum.random(gap)}
-      n when n <= 68 -> {:lock, name, Enum.random(cells)}
-      n when n <= 74 -> {:scent, name, Enum.random([true, false])}
+      n when n <= 70 -> {:lock, name, Enum.random(cells)}
       n when n <= 84 and body == nil -> {:join, name}
       n when n <= 86 and body != nil -> {:leave, name}
       n when n <= 96 -> {:tick, Enum.random(1..12)}
@@ -82,21 +98,34 @@ defmodule Colony.ContractMonitorTest do
   end
 
   test "a correct run has no violation" do
-    context = start(helpers: 0, workers: 0)
+    context = start(helpers: 0, workers: 1)
     assert send!(context, {:join, :p1}) == :ok
     # The nest is the cell 2. The cells 6 to 11 are the first row of the river.
     assert send!(context, {:move, :p1, 3}) == :ok
     assert send!(context, {:move, :p1, 8}) == :no
-    # The colony has no free worker: the player has no body after the lock.
-    assert send!(context, {:lock, :p1, 8}) == {:ok, -1}
-    assert send!(context, {:where, :p1}) == {:dead, 2}
+    # A cell that is not open: the second row of the river.
+    assert send!(context, {:lock, :p1, 14}) == {:error, -1}
+    # The lock uses the one spare body of the colony.
+    assert {:ok, at} = send!(context, {:lock, :p1, 8})
+    assert send!(context, {:where, :p1}) == {:alive, at}
+    assert send!(context, :spare) == 0
+
+    # With no spare body, a lock is not possible.
+    assert send!(context, {:tick, 12}) == :ok
+    assert send!(context, {:move, :p1, 3}) in [:ok, :no]
+    assert send!(context, {:move, :p1, 3}) == :ok
     assert send!(context, {:lock, :p1, 9}) == {:error, -1}
-    assert send!(context, {:tick, 30}) == :ok
-    assert send!(context, {:where, :p1}) == {:alive, 2}
+
+    # The nest makes a worker each 10 seconds. Then the lock is possible.
+    assert send!(context, {:tick, 100}) == :ok
+    assert send!(context, :spare) == 1
+    assert {:ok, _at} = send!(context, {:lock, :p1, 9})
 
     [state] = Monitor.states(context.monitor)
-    assert state["bodies"] == MapSet.new([8])
+    assert state["bodies"] == MapSet.new([8, 9])
     assert state["life"] == %{"p1" => "alive", "p2" => "out"}
+    assert state["spare"] == 0
+    assert Contract.Server.events(context.server)[:worker_made] == 1
   end
 
   test "after a lock, the player has the body of a worker and cannot lock for a moment" do
@@ -106,7 +135,7 @@ defmodule Colony.ContractMonitorTest do
     assert {:ok, cell} = send!(context, {:lock, :p1, 8})
     assert cell >= 0
 
-    assert [%{"rest" => %{"p1" => true}}] = Monitor.states(context.monitor)
+    assert [%{"rest" => %{"p1" => true}, "spare" => 4}] = Monitor.states(context.monitor)
     assert send!(context, {:tick, 10}) == :ok
     assert [%{"rest" => %{"p1" => false}}] = Monitor.states(context.monitor)
     assert Contract.Server.events(context.server)[:rested] == 1
@@ -115,19 +144,23 @@ defmodule Colony.ContractMonitorTest do
   test "the monitor sees a world that does not obey the contract" do
     # A world with a wrong support rule: its bank support is 3, and the contract says 2.
     # It has no helper, thus the lock of the player is the first step that is wrong.
-    context = start(bank_support: 3, helpers: 0, workers: 0)
+    context = start(bank_support: 3, helpers: 0, workers: 3)
     assert Monitor.call(context.monitor, {:join, :p1}) == :ok
     assert Monitor.call(context.monitor, {:move, :p1, 3}) == :ok
-    assert Monitor.call(context.monitor, {:lock, :p1, 8}) == {:ok, -1}
+    assert {:ok, _at} = Monitor.call(context.monitor, {:lock, :p1, 8})
     Monitor.call(context.monitor, {:tick, 30})
-    assert Monitor.call(context.monitor, {:move, :p1, 3}) == :ok
-    assert Monitor.call(context.monitor, {:move, :p1, 8}) == :ok
+    world = Contract.Server.world(context.server)
+
+    for cell <- Colony.Sim.path(world, world.players[1].cell, 8) do
+      assert Monitor.call(context.monitor, {:move, :p1, cell}) == :ok
+    end
+
     assert ViolationCollector.drain() == []
 
-    # With bank support 2, a second body in a row of its own has no support.
-    # The contract says "error". This world says "ok".
+    # With bank support 2, a second body in a row of its own has no support: the cell
+    # is not open. The contract says "error". This world says "ok".
     assert {:accord_violation, violation} = Monitor.call(context.monitor, {:lock, :p1, 14})
-    assert violation.reply == {:ok, -1}
+    assert {:ok, _at} = violation.reply
     assert violation.blame == :server
     assert violation.kind == :invalid_reply
     assert violation.expected == [["error", -1]]
@@ -147,14 +180,14 @@ defmodule Colony.ContractMonitorTest do
         end)
 
       # The run used the contract: moves and locks that the world accepted and refused,
-      # a helper that locked, bodies that the players took, and new bodies.
+      # a helper that locked, bodies that the players took, and new workers of the nest.
       events = Contract.Server.events(context.server)
 
       for key <- [move: :ok, move: :no, lock: :ok, lock: :error] do
         assert Map.get(replies, key, 0) > 0, "no #{inspect(key)} in #{inspect(replies)}"
       end
 
-      for key <- [:helper_locked, :rested] do
+      for key <- [:helper_locked, :rested, :worker_made] do
         assert Map.get(events, key, 0) > 0, "no #{key} in #{inspect(events)}"
       end
 

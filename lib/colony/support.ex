@@ -166,47 +166,64 @@ defmodule Colony.Support do
   end
 
   @doc """
-  The reach of a bridge: how far it can grow, one body wide, in a straight line to the far bank.
+  The open cells of river `k`: the cells where a lock is possible and helps.
 
-  `supports` are the supports of the bodies of the bridge, and `locked` has these bodies.
-  Returns `{row, bank?}`: the highest river row that the bridge can get to, and true if
-  it can get to the far bank.
+  `start` has the cells for the first body of the bridge. The rules:
+
+  1. With no body in the river, the cells of `start` are open.
+  2. A bridge that touches land `k` is complete. It has no open cell.
+  3. Forward first. If a lock is possible in a cell of the row after the top row, and the
+     cell touches the bridge, only these cells are open.
+  4. If not, a cell that touches the bridge is open if a body there makes the highest
+     support of the top row larger.
   """
-  def reach(grid, rule, locked, supports) do
-    Enum.reduce(supports, {0, false}, fn {cell, support}, best ->
-      max_reach(best, grow(grid, rule, locked, cell, support))
+  def open(grid, rule, locked, k, start) do
+    bridge = for {cell, _} <- locked, Grid.river(grid, cell) == k, do: cell
+
+    cond do
+      bridge == [] ->
+        start
+
+      Enum.any?(bridge, &Grid.touches_land?(grid, &1, k)) ->
+        []
+
+      true ->
+        top = bridge |> Enum.map(&Grid.row(grid, &1)) |> Enum.max()
+
+        ahead =
+          for cell <- bridge,
+              Grid.row(grid, cell) == top,
+              next <- Grid.forward(grid, cell),
+              can_lock?(grid, rule, locked, next),
+              uniq: true,
+              do: next
+
+        if ahead == [], do: wider(grid, rule, locked, k, bridge, top), else: ahead
+    end
+  end
+
+  defp wider(grid, rule, locked, k, bridge, top) do
+    now = calculate(grid, rule, Map.take(locked, bridge))
+    before = top_support(grid, now, top)
+
+    cells =
+      for cell <- bridge,
+          next <- Grid.neighbors(grid, cell),
+          Grid.river(grid, next) == k,
+          not is_map_key(locked, next),
+          uniq: true,
+          do: next
+
+    Enum.filter(cells, fn cell ->
+      supports = with_body(grid, rule, locked, cell)
+      Map.get(supports, cell, 0) > 0 and top_support(grid, supports, top) > before
     end)
   end
 
-  defp max_reach({row_a, bank_a} = a, {row_b, bank_b} = b) do
-    cond do
-      bank_a != bank_b -> if bank_a, do: a, else: b
-      row_a >= row_b -> a
-      true -> b
-    end
-  end
-
-  # Goes from a body to the next row, again and again, while a body there has support.
-  defp grow(grid, rule, locked, cell, support) do
-    row = Grid.river_row(grid, cell)
-
-    case Grid.forward(grid, cell) do
-      [next | _] ->
-        cond do
-          Grid.kind(grid, next) != :gap ->
-            {row, true}
-
-          is_map_key(locked, next) ->
-            {row, false}
-
-          true ->
-            locked = Map.put(locked, next, true)
-            after_cost = support - cost(grid, rule, locked, next)
-            if after_cost > 0, do: grow(grid, rule, locked, next, after_cost), else: {row, false}
-        end
-
-      [] ->
-        {row, false}
-    end
+  @doc "The highest support of the bodies of a row."
+  def top_support(grid, supports, row) do
+    Enum.reduce(supports, 0, fn {cell, support}, best ->
+      if Grid.row(grid, cell) == row, do: max(best, support), else: best
+    end)
   end
 end

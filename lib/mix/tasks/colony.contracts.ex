@@ -7,7 +7,8 @@ defmodule Mix.Tasks.Colony.Contracts do
       mix colony.contracts [MODULE ...]
 
   With no module names, the task checks all the modules: `Bridge`, `BridgeWide`,
-  `BridgeOneWide`, `BridgeTwoWide`, `BridgeThreeWide` and `Colony`. Each module has a
+  `BridgeOpen`, `BridgeOneWide`, `BridgeTwoWide`, `BridgeThreeWide`, `BridgeNineRows` and
+  `Colony`. Each module has a
   config file with the same name: the model that the checker explores.
 
   The checker is a package for development and tests. It is not in a production build.
@@ -15,7 +16,7 @@ defmodule Mix.Tasks.Colony.Contracts do
 
   use Mix.Task
 
-  @modules ~w(Bridge BridgeWide BridgeOneWide BridgeTwoWide BridgeThreeWide Colony)
+  @modules ~w(Bridge BridgeWide BridgeOpen BridgeOneWide BridgeTwoWide BridgeThreeWide BridgeNineRows Colony)
 
   @impl true
   def run(args) do

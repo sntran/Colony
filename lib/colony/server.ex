@@ -18,8 +18,8 @@ defmodule Colony.Server do
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
-  @doc "A client joins. Returns `{:ok, id, snapshot}`. A demo client gets no body."
-  def join(pid, name, demo?), do: GenServer.call(__MODULE__, {:join, pid, name, demo?})
+  @doc "A client joins. Returns `{:ok, id, snapshot}`. A client that only looks gets no body."
+  def join(pid, name, look?), do: GenServer.call(__MODULE__, {:join, pid, name, look?})
 
   @doc "A player tells where the body is."
   def move(id, binary), do: GenServer.cast(__MODULE__, {:move, id, binary})
@@ -27,8 +27,7 @@ defmodule Colony.Server do
   @doc """
   A player locks the body into a cell.
 
-  Returns `{:ok, body}` or `:error`. `body` is the new body of the player: `%{x, z, worker}`
-  for the body of a worker, or `%{wait: seconds}` when the colony has no free worker.
+  Returns `{:ok, body}` or `:error`. `body` is the new body of the player: `%{x, z, worker}`.
   """
   def lock(id, cell, position), do: GenServer.call(__MODULE__, {:lock, id, cell, position})
 
@@ -37,6 +36,9 @@ defmodule Colony.Server do
 
   @doc "The records of the bridges, the newest first."
   def records, do: GenServer.call(__MODULE__, :records)
+
+  @doc "The story of the world: see `Colony.World.story/1`."
+  def story, do: GenServer.call(__MODULE__, :story)
 
   @doc "The tick times in microseconds, sorted, and the size of the world. `reset: true` then removes the times."
   def stats(opts \\ []), do: GenServer.call(__MODULE__, {:stats, opts})
@@ -53,11 +55,15 @@ defmodule Colony.Server do
     path = Store.path(cfg)
 
     world =
-      case Store.load(path) do
+      case Store.load(path, World.save_version()) do
         {:ok, saved} ->
           world = World.new(cfg, saved)
           Logger.info("World loaded from #{path}: #{map_size(world.locked)} locked bodies.")
           world
+
+        {:old, kept} ->
+          Logger.info("The save file is from an older game. It is now #{kept}. New world.")
+          World.new(cfg)
 
         :none ->
           Logger.info("New world. The save file is #{path}.")
@@ -72,7 +78,7 @@ defmodule Colony.Server do
       interval: div(1000, rate),
       save_ticks: Keyword.fetch!(cfg, :save_seconds) * rate,
       next_at: System.monotonic_time(:millisecond),
-      # pid => {monitor reference, player id or :demo}
+      # pid => {monitor reference, player id or :look}
       clients: %{},
       # player id => pid
       pids: %{},
@@ -84,12 +90,11 @@ defmodule Colony.Server do
   end
 
   @impl true
-  def handle_call({:join, pid, name, demo?}, _from, state) do
+  def handle_call({:join, pid, name, look?}, _from, state) do
     reference = Process.monitor(pid)
 
-    if demo? do
-      state = put_in(state.clients[pid], {reference, :demo})
-      state = update_demo(state)
+    if look? do
+      state = put_in(state.clients[pid], {reference, :look})
       {:reply, {:ok, 0xFFFF, Protocol.snapshot(state.world, 0xFFFF)}, state}
     else
       {world, id} = World.join(state.world, name)
@@ -110,16 +115,8 @@ defmodule Colony.Server do
 
     case World.lock(world, id, cell) do
       {:ok, world} ->
-        reply =
-          case Map.fetch!(world.players, id) do
-            %{state: :alive} = player ->
-              %{x: player.x, z: player.z, worker: player.took}
-
-            _dead ->
-              %{wait: div(world.p.respawn_ticks, world.p.rate)}
-          end
-
-        {:reply, {:ok, reply}, %{state | world: world}}
+        player = Map.fetch!(world.players, id)
+        {:reply, {:ok, %{x: player.x, z: player.z, worker: player.took}}, %{state | world: world}}
 
       {_error, world} ->
         {:reply, :error, %{state | world: world}}
@@ -140,6 +137,10 @@ defmodule Colony.Server do
     {:reply, Enum.map(state.world.records, &Protocol.record/1), state}
   end
 
+  def handle_call(:story, _from, state) do
+    {:reply, World.story(state.world), state}
+  end
+
   def handle_call({:stats, opts}, _from, state) do
     stats = %{
       tick_times: Enum.sort(state.times),
@@ -148,7 +149,9 @@ defmodule Colony.Server do
       locked: map_size(state.world.locked),
       players: Enum.count(state.world.players, fn {_id, player} -> player.helper == nil end),
       helpers: Enum.count(state.world.players, fn {_id, player} -> player.helper != nil end),
-      pile: state.world.pile,
+      piles: state.world.piles,
+      stage: state.world.stage,
+      complete: state.world.complete,
       records: length(state.world.records),
       food_nest: state.world.food_nest,
       scent_cells: map_size(state.world.scent),
@@ -197,8 +200,8 @@ defmodule Colony.Server do
       {nil, _} ->
         {:noreply, state}
 
-      {{_reference, :demo}, clients} ->
-        {:noreply, update_demo(%{state | clients: clients})}
+      {{_reference, :look}, clients} ->
+        {:noreply, %{state | clients: clients}}
 
       {{_reference, id}, clients} ->
         state = %{
@@ -224,17 +227,12 @@ defmodule Colony.Server do
 
   defp apply_move(world, id, binary) when is_binary(binary) do
     case Protocol.decode_move(binary) do
-      {:ok, x, z, heading, scent?} -> World.move(world, id, x, z, heading, scent?)
+      {:ok, x, z, heading} -> World.move(world, id, x, z, heading)
       :error -> world
     end
   end
 
   defp apply_move(world, _id, _other), do: world
-
-  defp update_demo(state) do
-    demo? = Enum.any?(state.clients, fn {_pid, {_reference, id}} -> id == :demo end)
-    %{state | world: World.set_demo(state.world, demo?)}
-  end
 
   # The ticks keep to the clock: a slow tick does not make all the later ticks late.
   defp schedule(state) do

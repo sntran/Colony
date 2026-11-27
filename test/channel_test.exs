@@ -35,10 +35,11 @@ defmodule ColonyWeb.ChannelTest do
     %{socket: socket, snapshot: snapshot}
   end
 
-  # The cell of the edge of the near bank, in the column of the nest, and the river cell after it.
+  # Goes to the edge of land 0 in the column of the nest. Returns the river cell after it.
+  # With the seed of this test, that cell is open: the pile is 6 columns or less from it.
   defp move_to_river(socket) do
     position = fn row ->
-      Colony.Protocol.encode_move(30 + 0.5 * rem(row, 2), row * Colony.Grid.row_step(), 0.0, false)
+      Colony.Protocol.encode_move(30 + 0.5 * rem(row, 2), row * Colony.Grid.row_step(), 0.0)
     end
 
     for row <- 7..13 do
@@ -52,7 +53,7 @@ defmodule ColonyWeb.ChannelTest do
   end
 
   test "the snapshot is binary and has the number of the player", %{snapshot: snapshot} do
-    assert <<_tick::32, 1, 1::16-little, 60::16-little, _rest::binary>> = snapshot
+    assert <<_tick::32, 1, 1::16-little, 60::16-little, 96, _rest::binary>> = snapshot
   end
 
   test "a lock with an `at` value that is not text does not stop the channel", %{socket: socket} do
@@ -108,13 +109,40 @@ defmodule ColonyWeb.ChannelTest do
 
     ref = push(socket, "body", %{"cell" => cell + 1})
     assert_reply(ref, :error)
+
+    # The story has the name of the player and the body.
+    ref = push(socket, "story", %{})
+
+    assert_reply(ref, :ok, %{
+      names: [%{name: "Ada", helper: false, bodies: 1, food: 0}],
+      crossings: 0
+    })
   end
 
   @tag workers: 0
-  test "with no free worker, the lock tells the seconds to the new body", %{socket: socket} do
+  test "with no spare body, the lock gets the reply error", %{socket: socket} do
     cell = move_to_river(socket)
     ref = push(socket, "lock", %{"cell" => cell})
-    assert_reply(ref, :ok, %{wait: 3}, 1000)
-    assert_push("you", %{state: "alive"}, 4000)
+    assert_reply(ref, :error, _, 1000)
+    # A cell that is not open also gets the reply error.
+    ref = push(socket, "lock", %{"cell" => cell + 60})
+    assert_reply(ref, :error, _, 1000)
+  end
+
+  test "a client that only looks gets the world and no body" do
+    {:ok, _reply, socket} =
+      subscribe_and_join(socket(ColonyWeb.UserSocket), "world", %{"look" => true})
+
+    assert_push(
+      "s",
+      {:binary,
+       <<_tick::32, 1, 1::16-little, 60::16-little, 96, _nest::16, _seed::32, 0xFFFF::16-little,
+         _rest::binary>>}
+    )
+
+    ref = push(socket, "lock", %{"cell" => 870})
+    assert_reply(ref, :error)
+    # The world has one player: the player of the setup.
+    assert Colony.Server.stats().players == 1
   end
 end

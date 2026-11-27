@@ -2,12 +2,12 @@ defmodule Mix.Tasks.Colony.Load do
   @shortdoc "Runs the load test: 1,000 workers, 20 clients and 8 helpers for 5 minutes"
 
   @moduledoc """
-  Runs the load test of plan 0001.
+  Runs the load test of plan 0001, in the world of plan 0003.
 
       mix colony.load [--seconds 300] [--workers 1000] [--clients 20] [--helpers 8] [--port 4010]
 
   The task starts the server with a new world that it does not save to the usual file.
-  The helpers build bridges to the piles, and the workers carry food.
+  The helpers build the bridges, and the workers carry food.
   Each client is a real WebSocket connection. It joins the channel as a player, moves
   10 times each second near the nest, and counts the bytes that it gets.
 
@@ -144,7 +144,7 @@ defmodule Mix.Tasks.Colony.Load do
         mean                       #{round(Enum.sum(rates) / length(rates))}
         maximum                    #{round(worst)}   (target: 30,000 or less) #{verdict(worst <= 30_000)}
       ticks each second that a client got, minimum  #{Float.round(Enum.min(ticks), 2)}
-      world at the end             #{stats.free_workers} free workers, #{stats.locked} locked bodies, #{stats.players} players, #{stats.helpers} helpers, #{stats.scent_cells} cells with scent, #{stats.food_nest} food at the nest, pile #{stats.pile.id} with #{stats.pile.units} units, #{stats.records} records
+      world at the end             #{stats.free_workers} spare bodies, #{stats.locked} locked bodies, #{stats.players} players, #{stats.helpers} helpers, #{stats.scent_cells} cells with scent, #{stats.food_nest} food at the nest, #{stats.stage - 1} crossings, #{stats.records} records
     """)
   end
 
@@ -167,7 +167,7 @@ defmodule Mix.Tasks.Colony.Load do
 
     rest = handshake(socket, "")
     name = "Load #{String.pad_leading(Integer.to_string(n), 2, "0")}"
-    send_frame(socket, 1, JSON.encode!(["1", "1", "world", "phx_join", %{name: name, demo: false}]))
+    send_frame(socket, 1, JSON.encode!(["1", "1", "world", "phx_join", %{name: name}]))
     :inet.setopts(socket, active: true)
 
     {x, z} = nest
@@ -182,8 +182,6 @@ defmodule Mix.Tasks.Colony.Load do
       x: x,
       z: z,
       heading: :rand.uniform() * 6.28,
-      # One client of three puts scent.
-      scent: rem(n, 3) == 0,
       buffer: rest,
       bytes: byte_size(rest),
       ticks: 0,
@@ -244,7 +242,7 @@ defmodule Mix.Tasks.Colony.Load do
       # Turn in the direction of the nest.
       %{state | heading: :math.atan2(nx - state.x, nz - state.z)}
     else
-      move = Protocol.encode_move(x, z, heading, state.scent)
+      move = Protocol.encode_move(x, z, heading)
       # A binary push of the channel protocol: kind 0, the sizes, then the texts and the data.
       send_frame(state.socket, 2, <<0, 1, 0, 5, 1, "1", "world", "m", move::binary>>)
       %{state | x: x, z: z, heading: heading}

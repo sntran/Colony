@@ -1,7 +1,12 @@
 ------------------------------- MODULE Bridge -------------------------------
 (***************************************************************************)
-(* The contract of a bridge: the lock rule and the support rule of plan    *)
-(* 0002, section 4.4. Each body beside a body helps.                       *)
+(* The contract of a bridge across one river: the support rule of plan     *)
+(* 0002, section 4.4, and the open cells of plan 0003, section 4.5.        *)
+(* A lock is possible only where it helps.                                 *)
+(*                                                                         *)
+(* The module has one river. The near bank is the land before the river,   *)
+(* and the far bank is the land after it. The world of the game has four   *)
+(* rivers. Its rule for each river is this module.                         *)
 (*                                                                         *)
 (* The grid is the grid of lib/colony/grid.ex. A cell is an integer:       *)
 (* row * Width + column. The rows with an odd number are half a cell to    *)
@@ -19,7 +24,8 @@ CONSTANTS
     River,      \* the width of the river in each column, as a sequence
     FarRows,    \* the rows of the far bank after the widest place of the river
     Bank,       \* the support of a bank cell that touches the river
-    Costs       \* the cost of a body in a line of 1, 2, ... bodies, as a sequence
+    Costs,      \* the cost of a body in a line of 1, 2, ... bodies, as a sequence
+    StartCols   \* the columns where the first body of the bridge can lock
 
 ASSUME /\ Width \in Nat \ {0}
        /\ NearRows \in Nat \ {0}
@@ -31,6 +37,7 @@ ASSUME /\ Width \in Nat \ {0}
        /\ \A i \in 1 .. Len(Costs) : Costs[i] \in Nat \ {0}
        \* A longer line has a lower cost, or the same cost.
        /\ \A i \in 1 .. Len(Costs) - 1 : Costs[i + 1] <= Costs[i]
+       /\ StartCols \subseteq 0 .. Width - 1
 
 \* The set of the gap cells that have a locked body.
 VARIABLE bodies
@@ -119,29 +126,68 @@ ReachFrom(S, start) == Grow(S, start, start)
 Reach(S) == ReachFrom(S, NearCells)
 
 -----------------------------------------------------------------------------
-(* The lock rule *)
+(* The open cells: a lock is possible only where it helps *)
 
-\* A body can lock into an empty river cell only if its support will be more than 0.
+\* A body has support in an empty river cell if its support will be more than 0.
 \* A cell with support touches a bank cell or a locked body.
 HasSupport(S, c) == c \in GapCells \ S /\ Support(S \cup {c})[c] > 0
 
+\* A bridge is complete when one of its bodies touches the far bank.
+Complete(S) == \E c \in S : Neighbors(c) \cap FarCells # {}
+
+\* The top row is the highest row of the bridge.
+Top(S) == Max({Row(c) : c \in S})
+
+\* The highest support of the bodies of S in a row.
+TopSupport(S, row) ==
+    LET f == Support(S)
+    IN  Max({0} \cup {f[c] : c \in {d \in S : Row(d) = row}})
+
+\* With no body in the river, the first row is open, in the start columns.
+StartCells == {c \in GapCells : Row(c) = NearRows /\ Col(c) \in StartCols}
+
+\* Forward first: the cells of the row after the top row that touch the bridge, and
+\* where a body has support.
+Ahead(S) ==
+    {c \in GapCells \ S : Row(c) = Top(S) + 1 /\ Neighbors(c) \cap S # {} /\ HasSupport(S, c)}
+
+\* Wider: the cells that touch the bridge, where a body has support and makes the
+\* highest support of the top row larger.
+Wider(S) ==
+    {c \in GapCells \ S :
+        /\ Neighbors(c) \cap S # {}
+        /\ HasSupport(S, c)
+        /\ TopSupport(S \cup {c}, Top(S)) > TopSupport(S, Top(S))}
+
+\* The open cells. A complete bridge has none: it takes no more bodies.
+Open(S) ==
+    IF S = {} THEN StartCells
+    ELSE IF Complete(S) THEN {}
+    ELSE IF Ahead(S) # {} THEN Ahead(S)
+    ELSE Wider(S)
+
 BridgeInit == bodies = {}
 
-\* A body locks into the cell c. A worker never locks: the body is the body of a
-\* player or of a helper.
+\* A body locks into the cell c. A lock is possible only into an open cell. A worker
+\* never locks: the body is the body of a player or of a helper.
 LockBody(c) ==
-    /\ HasSupport(bodies, c)
+    /\ c \in Open(bodies)
     /\ bodies' = bodies \cup {c}
 
-\* The model of this module: all the free bodies come from the near bank. A free
-\* body locks into a cell that touches the cell where the body is. (The module
-\* Colony has the free bodies of the players.)
-\*
-\* A bridge can have a state with no next step: no cell where a lock is possible.
-\* Thus the configs have CHECK_DEADLOCK FALSE.
-BridgeNext == \E c \in GapCells : Neighbors(c) \cap Reach(bodies) # {} /\ LockBody(c)
+\* A complete bridge has no next step. Thus the configs have CHECK_DEADLOCK FALSE.
+BridgeNext == \E c \in GapCells : LockBody(c)
 
 BridgeSpec == BridgeInit /\ [][BridgeNext]_bodies
+
+\* A second model, for the checks of the support rule: a body locks into each cell
+\* where it has support, open or not. This model has more structures than the open
+\* cells permit. All the free bodies come from the near bank.
+FreeLock(c) ==
+    /\ HasSupport(bodies, c)
+    /\ Neighbors(c) \cap Reach(bodies) # {}
+    /\ bodies' = bodies \cup {c}
+
+SupportSpec == BridgeInit /\ [][\E c \in GapCells : FreeLock(c)]_bodies
 
 -----------------------------------------------------------------------------
 (* What is always true *)
@@ -171,6 +217,31 @@ BodyBesideHelps ==
 
 \* A locked body stays: no step removes it.
 BodiesStay == [][bodies \subseteq bodies']_bodies
+
+\* A body has support in each open cell.
+OpenHasSupport == \A c \in Open(bodies) : HasSupport(bodies, c)
+
+\* A free body from the near bank can get to a cell that touches each open cell.
+OpenIsNear == \A c \in Open(bodies) : Neighbors(c) \cap Reach(bodies) # {}
+
+\* One bridge for each river: all the bodies touch each other.
+RECURSIVE Spread(_, _, _)
+Spread(S, seen, front) ==
+    LET more == (UNION {Neighbors(c) : c \in front} \cap S) \ seen
+    IN  IF more = {} THEN seen ELSE Spread(S, seen \cup more, more)
+
+OneBridge ==
+    bodies = {} \/ (LET c == CHOOSE x \in bodies : TRUE IN Spread(bodies, {c}, {c}) = bodies)
+
+\* No bridge stops before the far bank: a bridge with no open cell is complete.
+NeverStuck == Open(bodies) = {} => (bodies # {} /\ Complete(bodies))
+
+\* A complete bridge takes no more bodies.
+CompleteTakesNoMore == [][Complete(bodies) => bodies' = bodies]_bodies
+
+\* Forward first: while a body has support in the next row, each lock is in that row.
+ForwardFirst ==
+    [][(bodies # {} /\ Ahead(bodies) # {}) => \E c \in Ahead(bodies) : bodies' = bodies \cup {c}]_bodies
 
 -----------------------------------------------------------------------------
 (* The results of the plan, for a config with the numbers of the plan *)
@@ -212,4 +283,14 @@ SmallRiver == Straight(3)
 BentRiver == <<2, 3, 3, 2>>
 LongRiver == Straight(50)
 OneBody == Cardinality(bodies) <= 1
+
+\* "A river of 9 rows needs 10 bodies": the first width of the table of plan 0003
+\* where a bridge must be wider than one body.
+NineRows == Straight(9)
+TenBodies == Complete(bodies) => Cardinality(bodies) = 10
+
+\* The same result with small numbers: with a bank support of 2, a bridge one body
+\* wide stops at 1 row, and a river of 3 rows needs 4 bodies.
+FourRiver == Straight(3)
+FourBodies == Complete(bodies) => Cardinality(bodies) = 4
 =============================================================================

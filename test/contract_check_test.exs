@@ -33,12 +33,24 @@ defmodule Colony.ContractCheckTest do
   end
 
   describe "the contract of a bridge" do
-    test "the lock rule and the support rule hold in all the states of a small river" do
+    test "the support rule holds in all the structures of a small river" do
       assert check!("Bridge").distinct_states > 100
     end
 
-    test "the rules hold on a river with a different width in its columns, with lines of 4 bodies" do
+    test "the rule holds on a river with a different width in its columns, with lines of 4 bodies" do
       assert check!("BridgeWide").distinct_states > 500
+    end
+
+    test "the open cells: one bridge, forward first, and no bridge stops before the far bank" do
+      assert check!("BridgeOpen").distinct_states > 20
+
+      # The checks are real: a bridge of this river does not have 3 bodies.
+      assert {:error, violation, _stats} =
+               Checker.check(spec("BridgeOpen"),
+                 invariant_exprs: ["Complete(bodies) => Cardinality(bodies) = 3"]
+               )
+
+      assert violation.kind == :invariant
     end
 
     test "a bridge one body wide stops at 7 rows, with the numbers of the plan" do
@@ -67,23 +79,26 @@ defmodule Colony.ContractCheckTest do
   end
 
   describe "the contract between a player and the world" do
-    test "all the states of a small world with one player" do
-      assert check!("Colony").distinct_states > 400
+    test "all the states of a small world with one player and two spare bodies" do
+      assert check!("Colony").distinct_states > 200
     end
   end
 
   describe "the numbers of the game config" do
-    # The contract with the grid, the river and the support rule of a real world, in
+    # The contract with the grid, river `k` and the support rule of a real world, in
     # temporary files.
-    defp plan_machine(world, dir, lines) do
-      {module, config} = Contract.plan_files(world, "ColonyPlan", lines)
-      File.write!(Path.join(dir, "ColonyPlan.tla"), module)
-      File.write!(Path.join(dir, "ColonyPlan.cfg"), config)
+    defp plan_machine(world, dir, k, lines) do
+      name = "ColonyPlan#{k}"
+      {module, config} = Contract.plan_files(world, name, k, lines)
+      File.write!(Path.join(dir, "#{name}.tla"), module)
+      File.write!(Path.join(dir, "#{name}.cfg"), config)
 
       {:ok, machine} =
-        Machine.load(Path.join(dir, "ColonyPlan.tla"), paths: [Path.dirname(Contract.spec_path())])
+        Machine.load(Path.join(dir, "#{name}.tla"), paths: [Path.dirname(Contract.spec_path())])
 
-      {:ok, [state]} = Machine.init_states(machine)
+      # The contract permits each number of workers at the start. The test uses the largest.
+      {:ok, states} = Machine.init_states(machine)
+      state = Enum.max_by(states, &Machine.to_map(machine, &1)["spare"])
       {machine, state}
     end
 
@@ -94,59 +109,87 @@ defmodule Colony.ContractCheckTest do
       next
     end
 
-    @tag :tmp_dir
-    test "the contract and the server have the same river and the same rule", %{tmp_dir: dir} do
-      world = World.new(Sim.cfg(seed: 3))
-      {machine, state} = plan_machine(world, dir, "")
-      col = world.pile.col
+    defp bodies(machine, state) do
+      Accord.Spec.Value.from_tla(Machine.to_map(machine, state)["bodies"])
+    end
 
-      # A bridge one body wide in the column of the pile.
-      state =
-        Enum.reduce(1..world.pile.width, state, fn row, state ->
-          cell = Sim.river_cell(world, row, col)
-          assert World.can_lock?(world, cell) or row > 1
-          step!(machine, state, "HelperLocked", [cell])
+    @tag :tmp_dir
+    test "the contract and the server have the same open cells on river 1", %{tmp_dir: dir} do
+      {world, id} = World.join(World.new(Sim.cfg(seed: 3, workers: 30)), "Tester")
+      {machine, state} = plan_machine(world, dir, 1, "")
+
+      # The player takes the highest open cell each time. The contract permits each lock.
+      {world, state} =
+        Enum.reduce_while(1..20, {world, state}, fn _, {world, state} ->
+          if world.stage > 1 do
+            {:halt, {world, state}}
+          else
+            cell = Enum.max(world.open)
+            # A cell that is not open is not a step of the contract.
+            closed =
+              Enum.find(Colony.Grid.neighbors(world.grid, cell), fn other ->
+                Colony.Grid.kind(world.grid, other) == :gap and not World.open?(world, other) and
+                  not is_map_key(world.locked, other)
+              end)
+
+            if closed do
+              refute match?(
+                       {:ok, [{_, nil}]},
+                       Machine.step(machine, state, "HelperLocked", [closed])
+                     )
+            end
+
+            {:cont, {Sim.lock!(world, id, cell), step!(machine, state, "HelperLocked", [cell])}}
+          end
         end)
 
-      bodies = Accord.Spec.Value.from_tla(Machine.to_map(machine, state)["bodies"])
-      assert MapSet.size(bodies) == world.pile.width
+      assert bodies(machine, state) == MapSet.new(World.bridge(world, 1))
+      assert MapSet.size(bodies(machine, state)) in 5..7
     end
 
     @tag :tmp_dir
     test "4 helpers on the grid of the game obey the contract of a bridge", %{tmp_dir: dir} do
-      world = World.new(Sim.cfg(helpers: 4, workers: 30, seed: 2, pile_units: 60))
-      {machine, state} = plan_machine(world, dir, "INVARIANT AllSupported\n")
+      world = World.new(Sim.cfg(helpers: 4, workers: 30, seed: 2, helper_lock_seconds: 4))
+      first = plan_machine(world, dir, 1, "INVARIANT AllSupported\n")
 
-      # The helpers build bridges to 3 piles. Each lock must be a step of the contract,
-      # and the bodies of the world must be the bodies of the contract.
-      {world, _state, count} =
-        Enum.reduce_while(1..6000, {world, state, 0}, fn _, {world, state, count} ->
+      # The helpers build the bridges of river 1 and of river 2. Each lock must be a step
+      # of the contract of its river, and the bodies of the world must be the bodies of
+      # the contract.
+      {world, _machines, count} =
+        Enum.reduce_while(1..6000, {world, %{1 => first}, 0}, fn _, {world, machines, count} ->
           {world, events} = World.tick(world)
 
-          {state, count} =
-            Enum.reduce(Enum.reverse(events.locks), {state, count}, fn {cell, body, _id},
-                                                                       {state, count} ->
+          {machines, count} =
+            Enum.reduce(Enum.reverse(events.locks), {machines, count}, fn {cell, body, _id},
+                                                                          {machines, count} ->
               assert body.helper
+              k = Colony.Grid.river(world.grid, cell)
+
+              {machine, state} =
+                machines[k] || plan_machine(world, dir, k, "INVARIANT AllSupported\n")
+
               next = step!(machine, state, "HelperLocked", [cell])
               assert Machine.check_invariants(machine, next) == :ok
-              {next, count + 1}
+              {Map.put(machines, k, {machine, next}), count + 1}
             end)
 
-          if events.locks != [] do
-            bodies = Accord.Spec.Value.from_tla(Machine.to_map(machine, state)["bodies"])
-            assert bodies == MapSet.new(Map.keys(world.locked))
+          for {_cell, _body, _id} <- Enum.take(events.locks, 1),
+              {k, {machine, state}} <- machines do
+            assert bodies(machine, state) == MapSet.new(World.bridge(world, k))
           end
 
-          if world.pile.id >= 3 and Sim.way_to_pile?(world) and count >= 30,
-            do: {:halt, {world, state, count}},
-            else: {:cont, {world, state, count}}
+          if world.stage >= 3,
+            do: {:halt, {world, machines, count}},
+            else: {:cont, {world, machines, count}}
         end)
 
       IO.puts(
-        "\n  4 helpers, grid of the game: #{count} locks are steps of the contract, pile #{world.pile.id}"
+        "\n  4 helpers, grid of the game: #{count} locks are steps of the contract, " <>
+          "#{world.stage - 1} crossings"
       )
 
-      assert count >= 30
+      assert world.stage == 3
+      assert count >= 15
     end
   end
 end

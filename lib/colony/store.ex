@@ -12,24 +12,28 @@ defmodule Colony.Store do
     # The world.
     :version,
     :seed,
+    :start,
     :locked,
+    :lock_count,
     :scent,
-    :pile,
-    :history,
+    :piles,
+    :stage,
+    :first_lock,
     :food_nest,
     :food_credit,
     :workers,
+    :food_by,
+    :period,
     :records,
-    # The pile and the piles before it.
+    :complete,
+    # A pile.
     :id,
     :cell,
     :col,
-    :width,
+    :size,
     :units,
     :appeared,
-    :first_lock,
-    :taken,
-    :start,
+    :crossed,
     # A record.
     :time,
     :seconds,
@@ -37,9 +41,10 @@ defmodule Colony.Store do
     :name,
     :helper,
     :bodies,
-    :rows,
     :food,
-    :done,
+    :rows,
+    :width,
+    :left,
     # Values.
     nil,
     true,
@@ -59,6 +64,28 @@ defmodule Colony.Store do
     File.write!(temporary, :erlang.term_to_binary(term, [:compressed]))
     File.rename!(temporary, path)
     :ok
+  end
+
+  @doc """
+  Reads the term of a save file with the version `version`.
+
+  Returns `{:ok, term}` or `:none`. A file of a different version is not loaded: it gets
+  a new name, and the result is `{:old, new path}`.
+  """
+  def load(path, version) do
+    case load(path) do
+      {:ok, %{version: ^version} = term} ->
+        {:ok, term}
+
+      {:ok, term} ->
+        old = if is_map(term) and is_integer(term[:version]), do: term[:version], else: 0
+        kept = "#{path}.v#{old}"
+        File.rename!(path, kept)
+        {:old, kept}
+
+      :none ->
+        :none
+    end
   end
 
   @doc "Reads the term. Returns `{:ok, term}` or `:none`."

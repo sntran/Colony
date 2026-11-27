@@ -2,43 +2,54 @@ defmodule Colony.Workers do
   @moduledoc """
   The rules of the workers.
 
-  A worker never locks. It follows scent, carries food, and is a spare body: after a lock,
-  a player takes the body of the nearest free worker.
+  A worker never locks. It carries food, and it is a spare body: at a lock, a player takes
+  the body of the nearest worker.
 
-  A free worker is on one cell. It moves one cell at a time. The speed gives the ticks
-  when a worker moves. At each move the worker uses the first rule that applies:
+  A worker is on one cell. It moves one cell at a time. The speed gives the ticks when a
+  worker moves. At each move the worker obeys the first rule that applies:
 
-  1. Carry. A worker with food goes to the nest by the shortest way.
-  2. Food. If the pile is near, go to it and take one unit.
-  3. Bridge. On a bridge, go to the far bank. At the end of a bridge that is not
-     complete, wait there if scent is near.
-  4. Go out. Go to the cell with the most scent that is farther from the nest.
-  5. Move at random near scent or near the nest. If the worker is too far, it goes home.
+  1. It carries food: go to the nest by the shortest way.
+  2. A pile with food is there, and the worker can walk to it: go to the nearest such pile
+     and take one unit.
+  3. A pile is there, and no body can walk to it: go to the crossing place and wait there.
+  4. Move at random near the nest.
+
+  If rules 2 and 3 apply at the same time, one worker of each three waits at the crossing
+  place. The other two carry food.
+
+  The workers smell the food: no rule reads the scent. A worker with food puts scent, and
+  the scent is a picture of the road.
   """
 
   alias Colony.{Grid, World}
 
   # A worker that moves at random stays where it is this part of the time.
   @rest_chance 0.5
+  # A worker that waits moves to the side this part of the time.
+  @shift_chance 0.06
   # Each worker has a different moment in the cycle of the moves.
   @golden 0.6180339887498949
 
-  @doc "Moves each free worker that has a move in this tick."
+  @doc "Moves each worker that has a move in this tick."
   def step(%World{} = world) do
     tick = world.tick
     step = world.p.step
 
-    Enum.reduce(world.workers, world, fn {id, _}, world ->
-      if moves_now?(id, tick, step) do
-        # An earlier step in this tick can remove this worker. Read the worker again.
-        case world.workers do
-          %{^id => worker} -> decide(world, id, worker)
-          _ -> world
-        end
-      else
-        world
-      end
-    end)
+    # `waiting`: the number of workers that wait at each cell.
+    waiting =
+      Enum.reduce(world.workers, %{}, fn
+        {_id, %{mode: :wait, cell: cell}}, acc -> Map.update(acc, cell, 1, &(&1 + 1))
+        _, acc -> acc
+      end)
+
+    state = %{waiting: waiting, count: waiting |> Map.values() |> Enum.sum()}
+
+    {world, _state} =
+      Enum.reduce(world.workers, {world, state}, fn {id, worker}, {world, state} = acc ->
+        if moves_now?(id, tick, step), do: decide(world, state, id, worker), else: acc
+      end)
+
+    world
   end
 
   defp moves_now?(id, tick, step) do
@@ -47,234 +58,198 @@ defmodule Colony.Workers do
     Float.floor(tick * step + phase) > Float.floor((tick - 1) * step + phase)
   end
 
-  defp decide(world, id, worker) do
-    cond do
-      worker.carry != nil ->
-        carry(world, id, worker)
+  defp decide(world, state, id, %{carry: carry} = worker) when carry != nil do
+    {carry(world, id, worker), state}
+  end
 
-      food_near?(world, worker.cell) ->
-        case food(world, id, worker) do
-          nil -> decide_no_food(world, id, worker)
-          world -> world
-        end
+  defp decide(world, state, id, worker) do
+    pile = near_pile(world, worker.cell)
+    place? = world.front != %{}
+
+    cond do
+      pile != nil and place? ->
+        {worker, state} = pick_work(world, state, worker)
+
+        if worker.mode == :wait,
+          do: wait(world, state, id, worker),
+          else: {food(world, id, worker, pile), state}
+
+      pile != nil ->
+        {food(world, id, %{worker | mode: :food}, pile), leave_wait(state, worker)}
+
+      place? ->
+        wait(world, join_wait(state, worker), id, %{worker | mode: :wait})
 
       true ->
-        decide_no_food(world, id, worker)
+        {wander(world, id, %{worker | mode: :idle}), leave_wait(state, worker)}
     end
   end
 
-  defp decide_no_food(world, id, worker) do
+  # One worker of each `wait_part` waits. The other workers carry food.
+  defp pick_work(world, state, worker) do
+    wanted = ceil(map_size(world.workers) / world.p.wait_part)
+
     cond do
-      worker.mode == :home -> home(world, id, worker)
-      at_bridge?(world, worker.cell) -> bridge(world, id, worker)
-      true -> go_out(world, id, worker)
+      worker.mode == :wait and state.count > wanted ->
+        {%{worker | mode: :food}, leave_wait(state, worker)}
+
+      worker.mode != :wait and state.count < wanted ->
+        {%{worker | mode: :wait}, join_wait(state, worker)}
+
+      worker.mode == :wait ->
+        {worker, state}
+
+      true ->
+        {%{worker | mode: :food}, state}
     end
   end
+
+  defp join_wait(state, %{mode: :wait}), do: state
+
+  defp join_wait(state, worker) do
+    %{waiting: Map.update(state.waiting, worker.cell, 1, &(&1 + 1)), count: state.count + 1}
+  end
+
+  defp leave_wait(state, %{mode: :wait} = worker) do
+    %{waiting: Map.update!(state.waiting, worker.cell, &(&1 - 1)), count: state.count - 1}
+  end
+
+  defp leave_wait(state, _worker), do: state
 
   # ---------------------------------------------------------------------------
-  # Rule: carry
+  # Rule 1: carry
 
   defp carry(world, id, worker) do
     case Map.get(world.walk, worker.cell) do
       nil ->
-        # There is no way to the nest. Stay near and wait for a bridge.
-        wander_free(world, id, worker)
+        # There is no way to the nest. This does not occur: no step removes a locked body.
+        world
 
       distance when distance <= 1 ->
         world
-        |> put(id, %{worker | carry: nil, crossed: nil, mode: :out})
+        |> put(id, %{worker | carry: nil, mode: :idle})
         |> World.event(:worker_set, {id, worker.cell, 0})
-        |> World.add_nest_food(worker.carry, worker.crossed)
+        |> World.add_nest_food(worker.carry, 1)
 
       distance ->
-        to = step_home(world, worker.cell, distance)
-        # The worker keeps one locked body of its way: the record of the bridge needs it.
-        crossed = if is_map_key(world.locked, to), do: to, else: worker.crossed
+        to = nearer(world, world.walk, worker.cell, distance)
 
         world
-        |> move(id, %{worker | crossed: crossed}, to)
+        |> move(id, worker, to)
         |> World.add_scent(to, world.p.scent_carry)
     end
   end
 
-  # The cell that is one step nearer to the nest. With more than one, take the most scent.
-  defp step_home(world, cell, distance) do
-    world.grid
-    |> Grid.neighbors(cell)
-    |> Enum.filter(&(Map.get(world.walk, &1) == distance - 1))
-    |> Enum.max_by(&World.scent(world, &1))
-  end
-
   # ---------------------------------------------------------------------------
-  # Rule: food
+  # Rule 2: food
 
-  # The pile is near if it is not more than some cells away and the worker has a way to
-  # it on foot.
-  defp food_near?(world, cell) do
-    world.pile.units > 0 and is_map_key(world.to_pile, cell) and
-      Grid.distance(world.grid, cell, world.pile.cell) <= world.p.food_radius
+  # The nearest pile with food that the worker can walk to: `{pile id, steps}` or nil.
+  defp near_pile(world, cell) do
+    Enum.reduce(world.piles, nil, fn {id, pile}, best ->
+      with true <- pile.units > 0,
+           steps when steps != nil <- Map.get(Map.fetch!(world.to_pile, id), cell),
+           true <- best == nil or steps < elem(best, 1) do
+        {id, steps}
+      else
+        _ -> best
+      end
+    end)
   end
 
   # Goes one step on the shortest way to the pile, or takes one unit.
-  defp food(world, id, worker) do
-    pile = world.pile
-    steps = Map.fetch!(world.to_pile, worker.cell)
-
+  defp food(world, id, worker, {pile, steps}) do
     if steps <= 1 do
+      {world, 1} = World.take_food(world, pile, 1)
+
       world
-      |> put(id, %{worker | carry: pile.id, crossed: nil, mode: :out})
+      |> put(id, %{worker | carry: pile, mode: :food})
       |> World.event(:worker_set, {id, worker.cell, 1})
       |> World.add_scent(worker.cell, world.p.scent_carry)
-      |> World.take_food()
     else
-      nearer =
-        Enum.filter(Grid.neighbors(world.grid, worker.cell), fn to ->
-          Map.get(world.to_pile, to) == steps - 1 and World.walkable?(world, to)
-        end)
-
-      case nearer do
-        [] -> nil
-        list -> move(world, id, worker, Enum.max_by(list, &World.scent(world, &1)))
-      end
+      move(world, id, worker, nearer(world, Map.fetch!(world.to_pile, pile), worker.cell, steps))
     end
+  end
+
+  # The cell that is one step nearer. With more than one, the first cell is used. Thus all
+  # the workers use the same road.
+  defp nearer(world, way, cell, steps) do
+    Enum.find(Grid.neighbors(world.grid, cell), &(Map.get(way, &1) == steps - 1))
   end
 
   # ---------------------------------------------------------------------------
-  # Rule: bridge
+  # Rule 3: wait at the crossing place
 
-  # A worker is at a bridge if it is on a locked body, or on a cell of the edge of the
-  # near bank that has scent and touches a locked body in the next row.
-  defp at_bridge?(world, cell) do
-    grid = world.grid
-
-    case Grid.kind(grid, cell) do
-      :gap ->
-        true
-
-      :near ->
-        Grid.row(grid, cell) == Grid.near_edge_row(grid) and World.scent(world, cell) > 0 and
-          Enum.any?(Grid.forward(grid, cell), &is_map_key(world.locked, &1))
-
-      :far ->
-        false
-    end
-  end
-
-  # On a bridge, go to the far bank by the shortest way along the bodies. A worker at the
-  # end of a bridge that is not complete waits there while scent is near: it is the next
-  # body of a player.
-  defp bridge(world, id, worker) do
-    grid = world.grid
+  # A worker goes as near to the crossing place as possible. One worker waits on each
+  # cell. Thus the workers make a line on the bridge and a crowd behind it.
+  defp wait(world, state, id, worker) do
     cell = worker.cell
+    world = put(world, id, worker)
 
-    next =
-      case Map.get(world.to_far, cell) do
-        1 -> Enum.filter(Grid.neighbors(grid, cell), &(Grid.kind(grid, &1) == :far))
-        nil -> Enum.filter(Grid.forward(grid, cell), &World.walkable?(world, &1))
-        steps -> Enum.filter(Grid.neighbors(grid, cell), &(Map.get(world.to_far, &1) == steps - 1))
-      end
+    case Map.get(world.front, cell) do
+      nil ->
+        {world, state}
 
-    cond do
-      next != [] -> move(world, id, worker, Enum.max_by(next, &World.scent(world, &1)))
-      is_map_key(world.leash, cell) -> world
-      true -> home(world, id, %{worker | mode: :home})
-    end
-  end
+      steps ->
+        free = fn to -> Map.get(state.waiting, to, 0) == 0 end
+        around = Grid.neighbors(world.grid, cell)
+        ahead = Enum.find(around, &(Map.get(world.front, &1) == steps - 1 and free.(&1)))
+        beside = Enum.filter(around, &(Map.get(world.front, &1) == steps and free.(&1)))
+        {chance, world} = random(world)
 
-  # ---------------------------------------------------------------------------
-  # Rule: go out
+        cond do
+          ahead != nil ->
+            shift(world, state, id, worker, ahead)
 
-  defp go_out(world, id, worker) do
-    grid = world.grid
-    cell = worker.cell
-    distance = Grid.nest_distance(grid, cell)
+          # The cell has a second worker, or the worker moves a little: go to a free cell
+          # that is not farther.
+          beside != [] and (Map.get(state.waiting, cell, 0) > 1 or chance < @shift_chance) ->
+            {world, to} = pick(world, beside)
+            shift(world, state, id, worker, to)
 
-    with_scent =
-      for to <- Grid.neighbors(grid, cell),
-          scent = World.scent(world, to),
-          scent > 0,
-          Grid.nest_distance(grid, to) > distance,
-          World.walkable?(world, to),
-          do: {scent, to}
-
-    case with_scent do
-      [] ->
-        if is_map_key(world.leash, cell) do
-          wander(world, id, worker)
-        else
-          home(world, id, %{worker | mode: :home})
+          true ->
+            {world, state}
         end
-
-      list ->
-        {best, _} = Enum.max(list)
-        {world, to} = pick(world, for({^best, to} <- list, do: to))
-        move(world, id, worker, to)
     end
   end
 
-  # Moves at random, but stays near scent or near the nest, and on the bank.
+  defp shift(world, state, id, worker, to) do
+    waiting =
+      state.waiting
+      |> Map.update!(worker.cell, &(&1 - 1))
+      |> Map.update(to, 1, &(&1 + 1))
+
+    {move(world, id, worker, to), %{state | waiting: waiting}}
+  end
+
+  # ---------------------------------------------------------------------------
+  # Rule 4: move at random near the nest
+
   defp wander(world, id, worker) do
-    {rest, world} = random(world)
-
-    if rest < @rest_chance do
-      world
-    else
-      cells =
-        Enum.filter(Grid.neighbors(world.grid, worker.cell), fn to ->
-          is_map_key(world.leash, to) and World.walkable?(world, to)
-        end)
-
-      case cells do
-        [] ->
-          world
-
-        cells ->
-          {world, to} = pick(world, cells)
-          move(world, id, worker, to)
-      end
-    end
-  end
-
-  # Moves at random on the cells where a body can be. For a worker that has no way home.
-  defp wander_free(world, id, worker) do
-    {rest, world} = random(world)
-
-    if rest < @rest_chance do
-      world
-    else
-      case Enum.filter(Grid.neighbors(world.grid, worker.cell), &World.walkable?(world, &1)) do
-        [] ->
-          world
-
-        cells ->
-          {world, to} = pick(world, cells)
-          move(world, id, worker, to)
-      end
-    end
-  end
-
-  # ---------------------------------------------------------------------------
-  # Rule: go home
-
-  defp home(world, id, worker) do
     grid = world.grid
     cell = worker.cell
+    world = put(world, id, worker)
 
-    cond do
-      Grid.kind(grid, cell) == :near and is_map_key(world.leash, cell) ->
-        go_out(put(world, id, %{worker | mode: :out}), id, %{worker | mode: :out})
+    if Grid.nest_distance(grid, cell) > world.p.leash or Grid.land(grid, cell) != 0 or
+         Grid.kind(grid, cell) == :gap do
+      case Map.get(world.walk, cell) do
+        nil -> world
+        0 -> world
+        steps -> move(world, id, worker, nearer(world, world.walk, cell, steps))
+      end
+    else
+      {rest, world} = random(world)
 
-      true ->
-        case Map.get(world.walk, cell) do
-          nil ->
-            wander_free(put(world, id, worker), id, worker)
+      cells =
+        Enum.filter(Grid.neighbors(grid, cell), fn to ->
+          Grid.kind(grid, to) == :land and Grid.nest_distance(grid, to) <= world.p.leash
+        end)
 
-          0 ->
-            put(world, id, %{worker | mode: :out})
-
-          distance ->
-            move(world, id, worker, step_home(world, cell, distance))
-        end
+      if rest < @rest_chance or cells == [] do
+        world
+      else
+        {world, to} = pick(world, cells)
+        move(world, id, worker, to)
+      end
     end
   end
 

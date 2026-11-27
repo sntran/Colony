@@ -1,108 +1,172 @@
 defmodule Colony.WorkersTest do
-  @moduledoc "Plan 0002, section 4.1: a worker never locks. It follows scent and carries food."
+  @moduledoc "The rules of the workers: plan 0003, section 4.1."
 
   use ExUnit.Case, async: true
 
   alias Colony.{Grid, Sim, World}
 
-  # 5 minutes of world time.
-  @five_minutes 3000
+  # The number of cells from a cell to the nearest cell of the crossing place of river 1,
+  # with no bridge: the edge of land 0, 3 columns or less from the column of the pile.
+  defp to_place(world, cell) do
+    col = world.piles[1].col
 
-  test "with no player and no helper, and scent from the nest to the river, no body locks in 5 minutes" do
+    for c <- (col - 3)..(col + 3) do
+      Grid.distance(world.grid, cell, Grid.cell(world.grid, 13, c))
+    end
+    |> Enum.min()
+  end
+
+  test "with no player and no helper, no body locks in 5 minutes, and the workers wait at the crossing place" do
     for seed <- 1..3 do
-      world = World.new(Sim.cfg(workers: 200, seed: seed))
+      world = World.new(Sim.cfg(seed: seed, workers: 30))
 
-      world =
-        Enum.reduce(1..@five_minutes, world, fn _, world ->
-          # The line of scent stays strong for all the test.
-          world = Sim.scent_line(world)
+      {world, locks} =
+        Enum.reduce(1..3000, {world, 0}, fn _, {world, locks} ->
           {world, events} = World.tick(world)
-          assert events.locks == []
-          world
+          {world, locks + length(events.locks)}
         end)
 
+      assert locks == 0
       assert world.locked == %{}
-      assert world.pile.units == 300
-      assert world.pile.first_lock == nil
-      assert map_size(world.workers) == 200
+      assert World.spare(world) == 30
+      assert world.food_nest == 0
 
-      # The workers followed the scent: many are at the river.
-      at_river = Enum.count(world.workers, fn {_id, w} -> Grid.row(world.grid, w.cell) >= 11 end)
-      assert at_river > 50
+      # All the workers wait, on land 0, near the edge of the river and near the column
+      # of the pile. One worker is on each cell.
+      cells = for {_id, worker} <- world.workers, do: worker.cell
+      assert Enum.all?(world.workers, fn {_id, worker} -> worker.mode == :wait end)
+
+      assert Enum.all?(
+               cells,
+               &(Grid.land(world.grid, &1) == 0 and Grid.kind(world.grid, &1) == :land)
+             )
+
+      assert Enum.uniq(cells) == cells
+      assert Enum.all?(cells, &(to_place(world, &1) <= 4))
+      # The 7 cells of the crossing place have a worker.
+      assert Enum.count(cells, &(to_place(world, &1) == 0)) == 7
     end
   end
 
-  test "workers with no scent stay near the nest" do
-    world = World.new(Sim.cfg(workers: 100)) |> Sim.run(600)
+  test "one body locks 6 times across river 1: food is at the nest in less than 20 seconds" do
+    cfg = Sim.cfg(workers: 30, rivers: [{6, 6}, {9, 11}, {12, 14}, {16, 18}])
+    {world, id} = World.join(World.new(cfg), "Tester")
+    # The player comes after one minute. The workers wait at the crossing place.
+    world = Sim.run(world, 600)
+    world = Sim.cross!(world, id, 1)
+    assert length(World.bridge(world, 1)) == 6
+    assert world.lock_count == 6
+    assert world.food_nest == 0
+
+    # The player does nothing more.
+    {world, ticks} = Sim.run_until(world, 600, &(&1.food_nest > 0))
+    assert ticks != nil
+    IO.puts("\n  first food after the crossing of river 1: #{ticks / 10} s")
+    assert ticks < 200
+    assert world.lock_count == 6
+    # The workers that waited on the bridge went across in a line.
+    assert Sim.way_to_pile?(world, 1)
+  end
+
+  test "the workers that wait make a line on the bridge and a crowd behind it" do
+    {world, id} = World.join(World.new(Sim.cfg(workers: 30)), "Tester")
+    col = world.piles[1].col
+    world = Sim.run(world, 300)
+    world = Sim.lock!(world, id, Sim.river_cell(world, 1, col))
+    world = Sim.lock!(world, id, Enum.min(world.open))
+    world = Sim.lock!(world, id, Enum.min(world.open))
+    world = Sim.run(world, 100)
+    bridge = World.bridge(world, 1)
+
+    # One worker waits on each body of the bridge. The other workers are on land 0.
+    on_bridge = for {_id, worker} <- world.workers, worker.cell in bridge, do: worker.cell
+    assert Enum.sort(on_bridge) == Enum.sort(bridge)
+    assert World.spare(world) == 27
+
+    # The next lock gives a body that is one step from the locked body.
+    top = Enum.max(bridge)
+    next = Enum.min(world.open)
+    world = Sim.lock!(world, id, next)
+    assert world.players[id].cell == top
+  end
+
+  test "when the workers can carry food, one worker of each three waits at the next crossing place" do
+    {world, id} = World.join(World.new(Sim.cfg(workers: 31)), "Tester")
+    world = world |> Sim.run(300) |> Sim.cross!(id, 1)
+    assert World.spare(world) == 31 - length(World.bridge(world, 1))
+    world = Sim.run(world, 600)
+
+    spare = World.spare(world)
+    waiting = Enum.count(world.workers, fn {_id, worker} -> worker.mode == :wait end)
+    assert waiting == ceil(spare / 3)
+    assert world.food_nest > 0
+
+    # The workers that wait are at the edge of river 2, near the column of pile 2.
+    edge = Grid.edge_row(world.grid, 2)
+    col = world.piles[2].col
+
+    for {_id, %{mode: :wait, cell: cell}} <- world.workers do
+      assert Grid.land(world.grid, cell) == 1
+      assert Grid.row(world.grid, cell) >= edge - 2
+      assert abs(Grid.col(world.grid, cell) - col) <= 5
+    end
+  end
+
+  test "a worker with food puts scent on the road, and no rule reads the scent" do
+    {world, id} = World.join(World.new(Sim.cfg(workers: 30)), "Tester")
+    world = world |> Sim.run(300) |> Sim.cross!(id, 1)
+    {world, _} = Sim.run_until(world, 600, &(&1.food_nest >= 10))
+    assert map_size(world.scent) > 10
+    assert Enum.all?(world.scent, fn {_cell, value} -> value in 1..100 end)
+
+    # With no scent, the workers do the same work.
+    blank = Sim.run(%{world | scent: %{}}, 300)
+    kept = Sim.run(world, 300)
+    assert blank.food_nest == kept.food_nest
+    assert blank.workers == kept.workers
+  end
+
+  test "with no pile that has food, the workers move near the nest" do
+    world = World.new(Sim.straight(5, workers: 12))
+    {world, id} = World.join(world, "Tester")
+    world = Sim.cross!(world, id, 1)
+    # The pile is empty.
+    world = %{world | piles: Map.update!(world.piles, 1, &%{&1 | units: 0})}
+    world = Sim.run(world, 600)
 
     for {_id, worker} <- world.workers do
+      assert worker.mode == :idle
+      assert Grid.land(world.grid, worker.cell) == 0
       assert Grid.nest_distance(world.grid, worker.cell) <= 6
     end
   end
 
-  test "workers wait at the end of a bridge that has scent: they are the next bodies" do
-    {world, id} = World.join(World.new(Sim.straight(8, workers: 30)), "Ada")
-    col = Grid.col(world.grid, world.grid.nest)
+  describe "the workers of the nest" do
+    test "5 units of food at the nest make one worker" do
+      world = World.new(Sim.cfg(workers: 10, food_per_worker: 5))
+      world = Enum.reduce(1..4, world, fn _, world -> World.add_nest_food(world, 1, 1) end)
+      assert World.spare(world) == 10
+      world = World.add_nest_food(world, 1, 1)
+      assert World.spare(world) == 11
+      # The new worker is at the nest.
+      assert Enum.any?(world.workers, fn {_id, worker} -> worker.cell == world.grid.nest end)
+      assert world.food_nest == 5
+    end
 
-    # The player goes from the nest to the river with scent and locks 3 bodies.
-    world =
-      Enum.reduce(1..3, world, fn n, world ->
-        stand =
-          if n == 1, do: Grid.cell(world.grid, 13, col), else: Sim.river_cell(world, n - 1, col)
+    test "the colony has 200 workers at most" do
+      world = World.new(Sim.cfg(workers: 199))
+      world = World.add_nest_food(world, 1, 50)
+      assert World.spare(world) == 200
+    end
 
-        world = Sim.walk(world, id, stand, true)
-        {:ok, world} = World.lock(world, id, Sim.river_cell(world, n, col))
-        world
-      end)
-
-    # The player waits at the end of the bridge with scent.
-    tip = Sim.river_cell(world, 3, col)
-    world = Sim.walk(world, id, tip, true)
-
-    world =
-      Enum.reduce(1..150, world, fn _, world ->
-        player = world.players[id]
-        world |> World.move(id, player.x, player.z, 0.0, true) |> Sim.run(1)
-      end)
-
-    on_bridge = Enum.count(world.workers, fn {_id, w} -> Grid.kind(world.grid, w.cell) == :gap end)
-    assert on_bridge >= 5
-
-    # After the next lock, the new body of the player is on the bridge, not at the nest.
-    assert {:ok, world} = World.lock(world, id, Sim.river_cell(world, 4, col))
-    assert Grid.kind(world.grid, world.players[id].cell) == :gap
-  end
-
-  test "workers go around a corner of a bridge to the pile" do
-    # A bridge that goes to the side at its end. A worker that goes only nearer to the
-    # pile in a straight line stops at the corner.
-    {world, id} = World.join(World.new(Sim.straight(6, workers: 20, pile_units: 30)), "Ada")
-    col = world.pile.col - 3
-
-    cells =
-      for(n <- 1..4, do: Sim.river_cell(world, n, col)) ++
-        for(c <- (col + 1)..(col + 3), do: Sim.river_cell(world, 4, c)) ++
-        for n <- 5..6, do: Sim.river_cell(world, n, col + 3)
-
-    world = Enum.reduce(cells, world, &Sim.lock!(&2, id, &1))
-    assert Sim.way_to_pile?(Sim.run(world, 1))
-
-    # Scent from the nest, along the bank, across the bridge and to the pile.
-    nest_col = Grid.col(world.grid, world.grid.nest)
-    step = if col >= nest_col, do: 1, else: -1
-    bank = for c <- nest_col..col//step, do: Grid.cell(world.grid, 6, c)
-
-    world =
-      Enum.reduce(
-        bank ++ [Grid.cell(world.grid, 13, col)] ++ cells,
-        world,
-        &Sim.walk(&2, id, &1, true)
-      )
-
-    world = Sim.walk(world, id, hd(Grid.neighbors(world.grid, world.pile.cell)), true)
-
-    {world, ticks} = Sim.run_until(world, @five_minutes, &(&1.food_nest >= 10))
-    assert ticks != nil, "the workers did not bring 10 units in 5 minutes"
-    assert [%{names: [%{name: "Ada", bodies: 9}]}] = world.records
+    test "with fewer than 5 spare bodies, the nest makes one worker each 10 seconds" do
+      world = World.new(Sim.cfg(workers: 2))
+      world = Sim.run(world, 100)
+      assert World.spare(world) == 3
+      world = Sim.run(world, 200)
+      assert World.spare(world) == 5
+      world = Sim.run(world, 300)
+      assert World.spare(world) == 5
+    end
   end
 end

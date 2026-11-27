@@ -5,7 +5,7 @@ defmodule ColonyWeb.WorldChannel do
   Events to the client: "s" (all the state, binary), "t" (the changes of a tick, binary),
   "you" (a message for this player only), "records" (all the records of the bridges) and
   "record" (one record that is new or that changed).
-  Events from the client: "m" (move, binary), "lock", "body" and "ping".
+  Events from the client: "m" (move, binary), "lock", "body", "story" and "ping".
 
   A message with wrong data gets the reply "error" or no reply. It does not stop the channel.
   """
@@ -26,14 +26,15 @@ defmodule ColonyWeb.WorldChannel do
 
   @impl true
   def handle_info({:after_join, params}, socket) do
-    demo? = params["demo"] == true
+    # A client that only looks gets no body: the demo mode and the story.
+    look? = params["look"] == true
     # If the world process stops, this channel stops also. The page then joins again and
     # gets the new world.
     Process.monitor(Server)
-    {:ok, id, snapshot} = Server.join(self(), clean_name(params["name"]), demo?)
+    {:ok, id, snapshot} = Server.join(self(), clean_name(params["name"]), look?)
     push(socket, "s", {:binary, snapshot})
     push(socket, "records", %{records: Server.records()})
-    {:noreply, assign(socket, :id, if(demo?, do: nil, else: id))}
+    {:noreply, assign(socket, :id, if(look?, do: nil, else: id))}
   end
 
   def handle_info({:you, message}, socket) do
@@ -81,6 +82,12 @@ defmodule ColonyWeb.WorldChannel do
   end
 
   def handle_in("body", _params, socket), do: {:reply, :error, socket}
+
+  # The players with their bodies and their food, for the story.
+  def handle_in("story", _params, socket) do
+    story = Server.story()
+    {:reply, {:ok, Map.take(story, [:start, :time, :complete, :crossings, :food, :names])}, socket}
+  end
 
   def handle_in("ping", _params, socket), do: {:reply, :ok, socket}
 

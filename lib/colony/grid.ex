@@ -2,15 +2,17 @@ defmodule Colony.Grid do
   @moduledoc """
   The grid of hexagonal cells.
 
-  A cell is an integer: `row * width + column`. Rows are parallel to the banks.
-  Row 0 is on the near bank. The rows with an odd number are moved half a cell to the right.
-  Thus each cell touches two cells in its row, two cells in the row before
-  and two cells in the row after.
+  A cell is an integer: `row * width + column`. Rows go from the south to the north.
+  Row 0 is the south edge of land 0. The rows with an odd number are moved half a cell to
+  the right. Thus each cell touches two cells in its row, two cells in the row before and
+  two cells in the row after.
 
   The distance between the centers of two cells that touch is 1.
 
-  The near bank has a straight edge. The river has a different width in each column,
-  thus the edge of the far bank is not straight. `river` has the width for each column.
+  The world goes north from the nest: land 0, river 1, land 1, river 2, and so on. Each
+  river goes across the full width of the grid. The south edge of a river is a straight
+  line of cells. The river has a different width in each column, thus its north edge is
+  not straight.
   """
 
   @row_step :math.sqrt(3) / 2
@@ -18,13 +20,16 @@ defmodule Colony.Grid do
   defstruct [
     :width,
     :rows,
-    :near_rows,
     :count,
     :nest,
-    # The width of the river in each column, as a tuple.
-    :river,
+    # One map for each river, as a tuple: %{start: the first row, widths: a tuple with the
+    # width in each column, max: the largest width}.
+    :rivers,
     # Tuples with one element for each cell.
+    # 0 for a land cell, `k` for a cell of river `k`.
     :kinds,
+    # The number of the land of a land cell. For a river cell: the number of its river.
+    :lands,
     :neighbors,
     :forward,
     :beside,
@@ -41,30 +46,42 @@ defmodule Colony.Grid do
   def new(cfg, seed) do
     width = Keyword.fetch!(cfg, :width)
     near = Keyword.fetch!(cfg, :near_rows)
-    river = river(cfg, seed)
-    rows = near + Keyword.fetch!(cfg, :river_max) + Keyword.fetch!(cfg, :far_rows)
+    land_rows = Keyword.fetch!(cfg, :land_rows)
     {nest_row, nest_col} = Keyword.fetch!(cfg, :nest)
+
+    # Each land after a river is `land_rows` deep at the widest place of the river.
+    {rivers, rows} =
+      cfg
+      |> rivers(seed)
+      |> Enum.map_reduce(near, fn widths, start ->
+        most = Enum.max(widths)
+        {%{start: start, widths: List.to_tuple(widths), max: most}, start + most + land_rows}
+      end)
 
     grid = %__MODULE__{
       width: width,
       rows: rows,
-      near_rows: near,
       count: width * rows,
       nest: nest_row * width + nest_col,
-      river: List.to_tuple(river)
+      rivers: List.to_tuple(rivers)
     }
 
     cells = 0..(grid.count - 1)
 
-    kinds =
+    zones =
       for cell <- cells do
         row = div(cell, width)
+        col = rem(cell, width)
 
-        cond do
-          row < near -> :near
-          row < near + elem(grid.river, rem(cell, width)) -> :gap
-          true -> :far
-        end
+        rivers
+        |> Enum.with_index(1)
+        |> Enum.reduce({0, 0}, fn {river, k}, zone ->
+          cond do
+            row < river.start -> zone
+            row < river.start + elem(river.widths, col) -> {k, k}
+            true -> {0, k}
+          end
+        end)
       end
 
     neighbors = for cell <- cells, do: calculate_neighbors(grid, cell)
@@ -85,7 +102,8 @@ defmodule Colony.Grid do
 
     grid = %{
       grid
-      | kinds: List.to_tuple(kinds),
+      | kinds: zones |> Enum.map(&elem(&1, 0)) |> List.to_tuple(),
+        lands: zones |> Enum.map(&elem(&1, 1)) |> List.to_tuple(),
         neighbors: List.to_tuple(neighbors),
         forward: List.to_tuple(forward),
         beside: List.to_tuple(beside)
@@ -95,85 +113,85 @@ defmodule Colony.Grid do
   end
 
   @doc """
-  The width of the river in each column, from the seed.
+  The width of each river in each column, from the seed: a list with one list for each river.
 
-  The narrowest place is `river_min` rows wide or one row more, near the nest. From there
-  the river gets wider by one row for each column, up to a width that changes slowly along
-  the river. Thus each width from the narrowest to the widest is somewhere.
+  The config `rivers` has `{least, most}` for each river. The width changes slowly along a
+  river, by 1 row or less from one column to the next. Each river has a place with its
+  least width and a place with its largest width.
   """
-  def river(cfg, seed) do
+  def rivers(cfg, seed) do
     width = Keyword.fetch!(cfg, :width)
-    low = Keyword.fetch!(cfg, :river_min)
-    high = Keyword.fetch!(cfg, :river_max)
 
-    if low == high do
-      List.duplicate(high, width)
-    else
-      Enum.find_value(0..199, fn attempt ->
-        try_river(cfg, :erlang.phash2({seed, attempt}), width, low, high)
-      end) ||
-        raise "cannot make a river for the seed #{seed}"
+    for {{low, high}, k} <- Enum.with_index(Keyword.fetch!(cfg, :rivers), 1) do
+      if low == high do
+        List.duplicate(high, width)
+      else
+        Enum.find_value(0..199, fn attempt ->
+          try_river(:erlang.phash2({seed, k, attempt}), width, low, high)
+        end) || raise "cannot make river #{k} for the seed #{seed}"
+      end
     end
   end
 
-  defp try_river(cfg, seed, width, low, high) do
-    {_nest_row, nest_col} = Keyword.fetch!(cfg, :nest)
-    span = Keyword.fetch!(cfg, :river_narrow_columns)
+  defp try_river(seed, width, low, high) do
     rng = :rand.seed_s(:exsss, seed)
-
-    {[p1, p2, p3, pick, extra], _rng} =
-      Enum.map_reduce(1..5, rng, fn _, r -> :rand.uniform_s(r) end)
-
-    narrow = low + trunc(extra * 2)
-    center = nest_col - span + trunc(pick * (2 * span + 1))
+    {[p1, p2, p3], _rng} = Enum.map_reduce(1..3, rng, fn _, r -> :rand.uniform_s(r) end)
 
     # A slow wave along the river.
     wave =
       for col <- 0..(width - 1) do
-        :math.sin(col * 0.19 + p1 * 6.283) + 0.6 * :math.sin(col * 0.43 + p2 * 6.283) +
-          0.3 * :math.sin(col * 0.83 + p3 * 6.283)
+        :math.sin(col * 0.17 + p1 * 6.283) + 0.5 * :math.sin(col * 0.37 + p2 * 6.283) +
+          0.2 * :math.sin(col * 0.71 + p3 * 6.283)
       end
 
     {least, most} = Enum.min_max(wave)
-    # Outside of the narrow place, the river is 3 rows wider than its minimum, or more.
-    floor = low + 3
 
     widths =
-      for {value, col} <- Enum.with_index(wave) do
-        open = floor + (high - floor) * (value - least) / (most - least)
-        valley = narrow + abs(col - center)
-        round(min(open, valley)) |> max(low) |> min(high)
+      for value <- wave do
+        round(low + (high - low) * (value - least) / (most - least))
       end
 
-    # The edge of the far bank has no step of more than 2 rows.
     smooth? =
-      widths |> Enum.chunk_every(2, 1, :discard) |> Enum.all?(fn [a, b] -> abs(a - b) <= 2 end)
+      widths |> Enum.chunk_every(2, 1, :discard) |> Enum.all?(fn [a, b] -> abs(a - b) <= 1 end)
 
-    needed = [narrow, high | Keyword.get(cfg, :pile_widths, [])]
-
-    if smooth? and Enum.min(widths) == narrow and Enum.all?(needed, &(&1 in widths)) do
-      widths
-    end
+    if smooth? and low in widths and high in widths, do: widths
   end
 
   def cell(%__MODULE__{width: width}, row, col), do: row * width + col
   def row(%__MODULE__{width: width}, cell), do: div(cell, width)
   def col(%__MODULE__{width: width}, cell), do: rem(cell, width)
 
-  @doc "The kind of a cell: `:near`, `:gap` or `:far`."
-  def kind(%__MODULE__{kinds: kinds}, cell), do: elem(kinds, cell)
+  @doc "The kind of a cell: `:land` or `:gap`. A gap is a river cell."
+  def kind(%__MODULE__{kinds: kinds}, cell), do: if(elem(kinds, cell) == 0, do: :land, else: :gap)
 
-  @doc "The width of the river in a column."
-  def river_width(%__MODULE__{river: river}, col), do: elem(river, col)
+  @doc "The number of the river of a river cell, from 1. For a land cell: 0."
+  def river(%__MODULE__{kinds: kinds}, cell), do: elem(kinds, cell)
 
-  @doc "The row of a river cell, from 1 at the near bank."
-  def river_row(%__MODULE__{width: width, near_rows: near}, cell), do: div(cell, width) - near + 1
+  @doc "The number of the land of a land cell, from 0. For a river cell: the number of its river."
+  def land(%__MODULE__{lands: lands}, cell), do: elem(lands, cell)
+
+  @doc "The number of rivers."
+  def river_count(%__MODULE__{rivers: rivers}), do: tuple_size(rivers)
+
+  @doc "The first row of river `k`."
+  def river_start(%__MODULE__{rivers: rivers}, k), do: elem(rivers, k - 1).start
+
+  @doc "The width of river `k` in a column."
+  def river_width(%__MODULE__{rivers: rivers}, k, col), do: elem(elem(rivers, k - 1).widths, col)
+
+  @doc "The row of a river cell in its river, from 1 at the south edge."
+  def river_row(%__MODULE__{width: width} = grid, cell) do
+    div(cell, width) - river_start(grid, river(grid, cell)) + 1
+  end
+
+  @doc "The last row of the land before river `k`."
+  def edge_row(grid, k), do: river_start(grid, k) - 1
 
   @doc "The cells that touch a cell."
   def neighbors(%__MODULE__{neighbors: neighbors}, cell), do: elem(neighbors, cell)
 
   @doc """
-  The cells that touch a cell and are in the next row, in the direction of the far bank.
+  The cells that touch a cell and are in the next row, to the north.
   The cell with the same column number is first.
   """
   def forward(%__MODULE__{forward: forward}, cell), do: elem(forward, cell)
@@ -181,16 +199,18 @@ defmodule Colony.Grid do
   @doc "The cells that touch a cell and are in the same row."
   def beside(%__MODULE__{beside: beside}, cell), do: elem(beside, cell)
 
-  @doc "The number of cells from a cell to the nest. The river is not an obstacle for this number."
+  @doc "The number of cells from a cell to the nest. A river is not an obstacle for this number."
   def nest_distance(%__MODULE__{nest_distance: distances}, cell), do: elem(distances, cell)
 
-  @doc "True if a river cell touches a bank cell."
-  def touches_bank?(grid, cell) do
-    Enum.any?(neighbors(grid, cell), &(kind(grid, &1) != :gap))
+  @doc "True if a river cell touches a land cell."
+  def touches_bank?(%__MODULE__{kinds: kinds} = grid, cell) do
+    Enum.any?(neighbors(grid, cell), &(elem(kinds, &1) == 0))
   end
 
-  @doc "The last row of the near bank."
-  def near_edge_row(%__MODULE__{near_rows: near}), do: near - 1
+  @doc "True if a cell touches a cell of land `k`."
+  def touches_land?(%__MODULE__{kinds: kinds, lands: lands} = grid, cell, k) do
+    Enum.any?(neighbors(grid, cell), &(elem(kinds, &1) == 0 and elem(lands, &1) == k))
+  end
 
   @doc "The center of a cell as `{x, z}`."
   def center(%__MODULE__{width: width}, cell) do

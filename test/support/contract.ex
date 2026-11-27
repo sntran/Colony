@@ -9,10 +9,11 @@ defmodule Colony.Contract do
 
   use Accord.Spec, file: "../../specs/Colony.tla", config: "../../specs/ColonyPlay.cfg"
 
+  alias Colony.Grid
+
   # These messages control the test. They are not part of the contract.
   @impl true
   def handle_call({:tick, _count}, _reply), do: :ignore
-  def handle_call({:scent, _player, _on}, _reply), do: :ignore
   def handle_call(request, reply), do: super(request, reply)
 
   @doc """
@@ -33,18 +34,22 @@ defmodule Colony.Contract do
     [rows] = Enum.uniq(sequence(config, "River"))
     costs = sequence(config, "Costs")
     scale = hd(costs)
+    [_, start] = Regex.run(~r/^\s*StartCols = \{([\d, ]+)\}/m, config)
+    # The contract of the test has all the columns as start columns.
+    ^width = length(String.split(start, ","))
 
     :colony
     |> Application.fetch_env!(:game)
     |> Keyword.merge(
       width: width,
       near_rows: number.("NearRows"),
-      far_rows: number.("FarRows"),
-      river_min: rows,
-      river_max: rows,
+      land_rows: number.("FarRows"),
+      rivers: [{rows, rows}],
+      start_columns: width,
       bank_support: div(number.("Bank"), scale),
       row_max: length(costs),
       nest: {div(nest, width), rem(nest, width)},
+      workers: number.("Workers"),
       seed: 1
     )
     |> Keyword.merge(changes)
@@ -66,14 +71,21 @@ defmodule Colony.Contract do
   end
 
   @doc """
-  The text of a module and of a config of the contract that have the numbers of a world:
-  its grid, its river and its support rule. Returns `{module_text, config_text}` for a
-  module with the name `name`.
+  The text of a module and of a config of the contract that have the numbers of river
+  `k` of a world: its grid, the river, the start columns and the support rule. Returns
+  `{module_text, config_text}` for a module with the name `name`.
+
+  The contract has one river. The rows before river `k` are its near bank.
   """
-  def plan_files(world, name, lines \\ "") do
+  def plan_files(world, name, k, lines \\ "") do
     grid = world.grid
-    river = grid.river |> Tuple.to_list() |> Enum.join(", ")
+    river = for(col <- 0..(grid.width - 1), do: Grid.river_width(grid, k, col)) |> Enum.join(", ")
     costs = world.rule.costs |> Tuple.to_list() |> Enum.join(", ")
+    pile = Map.fetch!(world.piles, k)
+
+    start =
+      for(col <- 0..(grid.width - 1), abs(col - pile.col) <= world.p.start_columns, do: col)
+      |> Enum.join(", ")
 
     module = """
     ---- MODULE #{name} ----
@@ -86,13 +98,16 @@ defmodule Colony.Contract do
     config = """
     CONSTANTS
         Width = #{grid.width}
-        NearRows = #{grid.near_rows}
-        FarRows = #{Keyword.fetch!(world.cfg, :far_rows)}
+        NearRows = #{Grid.river_start(grid, k)}
+        FarRows = #{Keyword.fetch!(world.cfg, :land_rows)}
         Bank = #{world.rule.bank}
         River <- TheRiver
         Costs <- TheCosts
+        StartCols = {#{start}}
         Players = {}
         Nest = #{grid.nest}
+        Workers = 200
+        MaxSpare = 200
     SPECIFICATION Spec
     #{lines}
     """
@@ -141,7 +156,6 @@ defmodule Colony.Contract.Server do
     state = %{
       world: World.new(game),
       ids: %{},
-      scent: MapSet.new(),
       # The players with a body that cannot lock now.
       resting: MapSet.new(),
       monitor: nil,
@@ -162,14 +176,13 @@ defmodule Colony.Contract.Server do
     {:reply, MapSet.new(Map.keys(state.world.locked)), state}
   end
 
-  def handle_call({:where, name}, _from, state) do
-    nest = state.world.grid.nest
+  def handle_call(:spare, _from, state), do: {:reply, World.spare(state.world), state}
 
+  def handle_call({:where, name}, _from, state) do
     reply =
       case player(state, name) do
-        nil -> {:out, nest}
-        %{state: :alive, cell: cell} -> {:alive, cell}
-        _dead -> {:dead, nest}
+        nil -> {:out, state.world.grid.nest}
+        %{cell: cell} -> {:alive, cell}
       end
 
     {:reply, reply, state}
@@ -206,10 +219,9 @@ defmodule Colony.Contract.Server do
     world = state.world
 
     with id when id != nil <- state.ids[name],
-         %{state: :alive} <- world.players[id],
          true <- cell in 0..(world.grid.count - 1) do
       {x, z} = Grid.center(world.grid, cell)
-      world = World.move(world, id, x, z, 0.0, MapSet.member?(state.scent, name))
+      world = World.move(world, id, x, z, 0.0)
       moved? = world.players[id].x == x and world.players[id].z == z
       {if(moved?, do: :ok, else: :no), %{state | world: world}, @pace}
     else
@@ -217,35 +229,16 @@ defmodule Colony.Contract.Server do
     end
   end
 
-  # The reply has the cell of the new body of the player, or -1.
+  # The reply has the cell of the new body of the player.
   defp act({:lock, name, cell}, state) do
     case state.ids[name] && World.lock(state.world, state.ids[name], cell) do
       {:ok, world} ->
-        case world.players[state.ids[name]] do
-          %{state: :alive, cell: at} ->
-            {{:ok, at}, %{state | world: world, resting: MapSet.put(state.resting, name)}, @pace}
-
-          _dead ->
-            {{:ok, -1}, %{state | world: world}, @pace}
-        end
+        at = world.players[state.ids[name]].cell
+        {{:ok, at}, %{state | world: world, resting: MapSet.put(state.resting, name)}, @pace}
 
       _ ->
         {{:error, -1}, state, @pace}
     end
-  end
-
-  # While the scent is on, the body puts scent on its cell.
-  defp act({:scent, name, on?}, state) do
-    scent = if on?, do: MapSet.put(state.scent, name), else: MapSet.delete(state.scent, name)
-    world = state.world
-
-    world =
-      case player(state, name) do
-        %{state: :alive} = body -> World.move(world, state.ids[name], body.x, body.z, 0.0, on?)
-        _ -> world
-      end
-
-    {:ok, %{state | world: world, scent: scent}, @pace}
   end
 
   defp act({:tick, count}, state), do: {:ok, state, count}
@@ -255,20 +248,17 @@ defmodule Colony.Contract.Server do
   defp run(state, ticks) do
     Enum.reduce(1..ticks//1, state, fn _, state ->
       {world, events} = World.tick(state.world)
-      names = Map.new(state.ids, fn {name, id} -> {id, name} end)
       state = %{state | world: world}
 
-      # The order is the order of the tick: new bodies, then the helpers.
-      respawns =
-        for {id, %{state: "alive"}} <- Enum.reverse(events.you), name = names[id] do
-          {:respawn, name}
-        end
+      # A new worker has the flag 2. The contract gets the new workers first: a helper
+      # that locks in this tick can use one of them.
+      made = for {_id, _cell, 2} <- events.worker_set, do: {:worker_made}
 
       # A body that a player took can lock again after some ticks.
       rested =
         for name <- state.resting,
             body = player(state, name),
-            body.state == :alive and world.tick >= body.ready_tick do
+            world.tick >= body.ready_tick do
           {:rested, name}
         end
 
@@ -278,7 +268,7 @@ defmodule Colony.Contract.Server do
       resting =
         Enum.reduce(rested, state.resting, fn {:rested, name}, set -> MapSet.delete(set, name) end)
 
-      Enum.reduce(respawns ++ rested ++ locks, %{state | resting: resting}, fn message, state ->
+      Enum.reduce(made ++ rested ++ locks, %{state | resting: resting}, fn message, state ->
         if state.monitor, do: Monitor.event(state.monitor, message)
         %{state | events: Map.update(state.events, elem(message, 0), 1, &(&1 + 1))}
       end)
