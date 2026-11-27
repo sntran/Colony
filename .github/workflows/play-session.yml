@@ -1,0 +1,76 @@
+# A play session: the game server on a runner, behind a quick tunnel of
+# Cloudflare. Start this workflow by hand, from the page Actions. The summary
+# of the job has the address of the game and the address of the story. Give
+# the address of the game to the players.
+#
+# This file is on the default branch, because GitHub starts a workflow by
+# hand only from there. The game comes from the branch of the input `branch`.
+#
+# The job gets no secret. At its end, it saves the world file, the records of
+# the bridges and the story as an artifact.
+name: Play session
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: The branch that has the game
+        type: string
+        default: feat/0003-the-crossing
+      minutes:
+        description: How long the server runs (120 or fewer)
+        type: number
+        default: 60
+      workers:
+        description: The number of workers at the start
+        type: number
+        default: 30
+      helpers:
+        description: The number of helpers
+        type: number
+        default: 0
+
+permissions:
+  contents: read
+
+concurrency:
+  group: play-session-${{ inputs.branch }}
+  cancel-in-progress: true
+
+jobs:
+  play:
+    name: Play ${{ inputs.branch }} for ${{ inputs.minutes }} minutes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 135
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.branch }}
+          persist-credentials: false
+      - name: Make sure that the branch has the game
+        env:
+          BRANCH: ${{ inputs.branch }}
+        run: |
+          for file in mix.exs scripts/play_session.sh; do
+            if [ ! -f "$file" ]; then
+              echo "::error::The branch $BRANCH has no $file. Give a branch that has the game in the input \"branch\"."
+              echo "The branch \`$BRANCH\` has no \`$file\`. It does not have the game. Start the workflow again with a branch that has the game." >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+          done
+      - name: Run the server and the tunnel
+        env:
+          MINUTES: ${{ inputs.minutes }}
+          WORKERS: ${{ inputs.workers }}
+          HELPERS: ${{ inputs.helpers }}
+        run: sh scripts/play_session.sh
+      - name: Save the world file, the records and the story
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: play-session-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/session/world.bin
+            ${{ runner.temp }}/session/records.json
+            ${{ runner.temp }}/session/server.log
+          if-no-files-found: warn
