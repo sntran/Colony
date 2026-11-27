@@ -31,17 +31,17 @@ config :colony, :game,
   pile_loss_seconds: 1,
   # The loss stops at this many units.
   pile_least: 50,
-  # A player takes food when the body is this many cells from the pile, or less.
-  food_touch: 1.2,
+  # A player takes food when the body is this many cells from the center of the pile, or
+  # less. A body that walks on a cell beside the pile does not take food.
+  food_touch: 0.75,
   # A player puts the food into the nest at this distance.
   nest_touch: 1.5,
   # The units that a player carries.
   player_food: 10,
 
   # The first body of a bridge locks this many columns or less from the column of the pile.
+  # With no bridge, the workers wait at the edge of the land, below these cells.
   start_columns: 6,
-  # With no bridge, the workers wait this many columns or less from the column of the pile.
-  wait_columns: 3,
   # While the workers can carry food, one worker of each `wait_part` waits at the crossing place.
   wait_part: 3,
 
@@ -61,7 +61,7 @@ config :colony, :game,
   workers: 30,
   workers_max: 200,
   # The nest makes 1 worker for each this many units of food.
-  food_per_worker: 5,
+  food_per_worker: 3,
   # With fewer spare bodies than `workers_low`, the nest makes 1 worker each `worker_seconds`.
   workers_low: 5,
   worker_seconds: 10,

@@ -95,11 +95,12 @@ defmodule Colony.HelpersTest do
     world = %{world | piles: Map.update!(world.piles, 1, &%{&1 | units: 25})}
 
     # The helpers carry 10 units each time. The nest makes workers from the food.
-    {world, ticks} = Sim.run_until(world, 3000, &(map_size(&1.food_by) > 0))
+    carried = fn world -> world.food_by |> Map.values() |> Enum.sum() end
+    {world, ticks} = Sim.run_until(world, 3000, &(carried.(&1) >= 5))
     assert ticks != nil
 
     assert Enum.all?(world.food_by, fn {{name, helper}, units} ->
-             helper and String.starts_with?(name, "Helper ") and units in [5, 10]
+             helper and String.starts_with?(name, "Helper ") and units > 0
            end)
 
     assert World.spare(world) >= 1 or map_size(world.locked) > 9

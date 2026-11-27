@@ -34,6 +34,7 @@ defmodule Colony.Store do
     :units,
     :appeared,
     :crossed,
+    :fed,
     # A record.
     :time,
     :seconds,

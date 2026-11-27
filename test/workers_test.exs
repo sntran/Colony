@@ -5,16 +5,9 @@ defmodule Colony.WorkersTest do
 
   alias Colony.{Grid, Sim, World}
 
-  # The number of cells from a cell to the nearest cell of the crossing place of river 1,
-  # with no bridge: the edge of land 0, 3 columns or less from the column of the pile.
-  defp to_place(world, cell) do
-    col = world.piles[1].col
-
-    for c <- (col - 3)..(col + 3) do
-      Grid.distance(world.grid, cell, Grid.cell(world.grid, 13, c))
-    end
-    |> Enum.min()
-  end
+  # The number of steps from a cell to the crossing place: the cells where a body can
+  # stand and lock into an open cell.
+  defp to_place(world, cell), do: Map.fetch!(world.front, cell)
 
   test "with no player and no helper, no body locks in 5 minutes, and the workers wait at the crossing place" do
     for seed <- 1..3 do
@@ -42,9 +35,16 @@ defmodule Colony.WorkersTest do
              )
 
       assert Enum.uniq(cells) == cells
-      assert Enum.all?(cells, &(to_place(world, &1) <= 4))
-      # The 7 cells of the crossing place have a worker.
-      assert Enum.count(cells, &(to_place(world, &1) == 0)) == 7
+      assert Enum.all?(cells, &(to_place(world, &1) <= 3))
+      # The 13 open cells are 6 columns or less from the column of the pile. The 14 cells
+      # of the edge of the land that touch them have a worker.
+      col = world.piles[1].col
+
+      assert Enum.sort(world.open) ==
+               for(c <- (col - 6)..(col + 6), do: Sim.river_cell(world, 1, c))
+
+      assert Enum.count(cells, &(to_place(world, &1) == 0)) == 14
+      assert Enum.count(world.front, fn {_cell, steps} -> steps == 0 end) == 14
     end
   end
 
@@ -105,11 +105,15 @@ defmodule Colony.WorkersTest do
     edge = Grid.edge_row(world.grid, 2)
     col = world.piles[2].col
 
-    for {_id, %{mode: :wait, cell: cell}} <- world.workers do
-      assert Grid.land(world.grid, cell) == 1
-      assert Grid.row(world.grid, cell) >= edge - 2
-      assert abs(Grid.col(world.grid, cell) - col) <= 5
-    end
+    # The workers that the nest made a moment before are on their way. The others are there.
+    there =
+      Enum.count(world.workers, fn {_id, worker} ->
+        worker.mode == :wait and Grid.land(world.grid, worker.cell) == 1 and
+          Grid.row(world.grid, worker.cell) >= edge - 2 and
+          abs(Grid.col(world.grid, worker.cell) - col) <= 8
+      end)
+
+    assert there * 3 >= waiting * 2
   end
 
   test "a worker with food puts scent on the road, and no rule reads the scent" do
@@ -139,6 +143,30 @@ defmodule Colony.WorkersTest do
       assert Grid.land(world.grid, worker.cell) == 0
       assert Grid.nest_distance(world.grid, worker.cell) <= 6
     end
+  end
+
+  test "a new pile calls 3 workers until its first food is at the nest" do
+    # Two rivers. The colony has no worker at the last crossing: the player used them all.
+    cfg = Sim.cfg(workers: 14, rivers: [{5, 5}, {9, 9}], workers_low: 0)
+    {world, id} = World.join(World.new(cfg), "Tester")
+    world = world |> Sim.cross!(id, 1) |> Sim.cross!(id, 2)
+    world = %{world | workers: %{}}
+    refute world.piles[2].fed
+
+    # The nest gets food from a player: new workers. Pile 1 is nearer to the nest, but 3
+    # workers go to pile 2.
+    world = World.add_nest_food(world, 1, 30)
+    assert World.spare(world) == 10
+    world = Sim.run(world, 5)
+    called = for {_id, %{mode: {:fetch, 2}}} = entry <- world.workers, do: entry
+    assert length(called) == 3
+
+    {world, ticks} = Sim.run_until(world, 1200, &(&1.complete != nil))
+    assert ticks != nil
+    assert world.piles[2].fed
+    # After the first food, no worker is called: the workers go to the nearest pile.
+    world = Sim.run(world, 100)
+    assert Enum.all?(world.workers, fn {_id, worker} -> not match?({:fetch, _}, worker.mode) end)
   end
 
   describe "the workers of the nest" do

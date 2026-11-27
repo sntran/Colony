@@ -5,21 +5,44 @@
 
 import { ROW_STEP, GAP } from "./hex.js";
 import { BODY_STRIDE, MESH_STRIDE, FOOD_COLOR } from "./state.js";
+import { viewOf, project } from "./view.js";
 import * as shapes from "./geometry.js";
 
-const FOG = [0.66, 0.78, 0.8];
 const SUN = [0.42, 0.8, -0.43];
+
+// The color of the fog and of the light in each season: spring, summer, autumn, winter.
+const AIR = [
+  { fog: [0.66, 0.8, 0.8], light: [1.0, 1.0, 0.97] },
+  { fog: [0.7, 0.82, 0.72], light: [1.07, 1.03, 0.9] },
+  { fog: [0.84, 0.74, 0.6], light: [1.1, 0.95, 0.8] },
+  { fog: [0.82, 0.87, 0.93], light: [0.93, 0.98, 1.08] },
+];
 
 const COMMON = `#version 300 es
 precision highp float;
 const vec3 SUN = vec3(${SUN.join(",")});
-const vec3 FOG = vec3(${FOG.join(",")});
-float fogAt(float distance) { return smoothstep(24.0, 62.0, distance); }
+uniform vec3 uFog;
+uniform vec3 uLight;
+uniform vec2 uFogRange;
+float fogAt(float distance) { return smoothstep(uFogRange.x, uFogRange.y, distance); }
 float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 float noise(vec2 p) {
   vec2 i = floor(p), f = fract(p);
   vec2 u = f * f * (3.0 - 2.0 * f);
   return mix(mix(hash(i), hash(i + vec2(1, 0)), u.x), mix(hash(i + vec2(0, 1)), hash(i + vec2(1, 1)), u.x), u.y);
+}
+// The cell of a point: column, row, and the distance from the center (0.5 at the edge).
+vec3 cellOf(vec2 p) {
+  float r = p.y / ${ROW_STEP};
+  float q = p.x - r * 0.5;
+  float s = -q - r;
+  float rq = floor(q + 0.5), rr = floor(r + 0.5), rs = floor(s + 0.5);
+  float dq = abs(rq - q), dr = abs(rr - r), ds = abs(rs - s);
+  if (dq > dr && dq > ds) rq = -rr - rs; else if (dr > ds) rr = -rq - rs;
+  float odd = mod(rr, 2.0);
+  float col = rq + (rr - odd) * 0.5;
+  vec2 d = abs(p - vec2(col + 0.5 * odd, rr * ${ROW_STEP}));
+  return vec3(col, rr, max(d.x, d.x * 0.5 + d.y * ${ROW_STEP}));
 }
 `;
 
@@ -40,22 +63,8 @@ uniform vec3 uEye;
 uniform float uTime;
 uniform vec2 uGrid;      // width, rows
 uniform sampler2D uScent;
-uniform sampler2D uBank;  // 1 for a bank cell, 0 for a river cell
+uniform sampler2D uSolid;  // more than 0.9 for a land cell
 out vec4 color;
-
-// The cell of a point: column, row, and the distance from the center (0.5 at the edge).
-vec3 cellOf(vec2 p) {
-  float r = p.y / ${ROW_STEP};
-  float q = p.x - r * 0.5;
-  float s = -q - r;
-  float rq = floor(q + 0.5), rr = floor(r + 0.5), rs = floor(s + 0.5);
-  float dq = abs(rq - q), dr = abs(rr - r), ds = abs(rs - s);
-  if (dq > dr && dq > ds) rq = -rr - rs; else if (dr > ds) rr = -rq - rs;
-  float odd = mod(rr, 2.0);
-  float col = rq + (rr - odd) * 0.5;
-  vec2 d = abs(p - vec2(col + 0.5 * odd, rr * ${ROW_STEP}));
-  return vec3(col, rr, max(d.x, d.x * 0.5 + d.y * ${ROW_STEP}));
-}
 
 void main() {
   vec3 n = normalize(vNormal);
@@ -65,24 +74,24 @@ void main() {
 
   vec3 cell = cellOf(vPos.xz);
   if (top > 0.0 && cell.x >= 0.0 && cell.x < uGrid.x && cell.y >= 0.0 && cell.y < uGrid.y &&
-      texelFetch(uBank, ivec2(cell.xy), 0).r > 0.5) {
+      texelFetch(uSolid, ivec2(cell.xy), 0).r > 0.9) {
     // A thin line between the cells.
-    c *= 1.0 - 0.13 * top * smoothstep(0.455, 0.5, cell.z);
-    // Scent: a soft spot of light in the cell.
+    c *= 1.0 - 0.1 * top * smoothstep(0.455, 0.5, cell.z);
+    // Scent: the road of the workers that carry food. A soft spot of light in the cell.
     float scent = texelFetch(uScent, ivec2(cell.xy), 0).r * 2.55;
     if (scent > 0.0) {
-      float spot = 1.0 - smoothstep(0.08, 0.47, cell.z);
-      float wave = 0.85 + 0.15 * sin(uTime * 2.5 + cell.x * 1.9 + cell.y * 2.3);
-      glow = top * spot * wave * (0.25 + 0.75 * scent);
+      float spot = 1.0 - smoothstep(0.1, 0.5, cell.z);
+      float wave = 0.88 + 0.12 * sin(uTime * 2.0 + cell.x * 1.9 + cell.y * 2.3);
+      glow = top * spot * wave * (0.2 + 0.8 * scent);
     }
   }
 
   float sun = max(dot(n, normalize(SUN)), 0.0);
-  c *= 0.5 + 0.62 * sun;
-  // The walls of the gap get dark in the direction of the bottom.
-  c *= mix(1.0, 0.3, clamp(-vPos.y / 3.4, 0.0, 1.0));
-  c = mix(c, vec3(0.93, 0.42, 1.0), glow * 0.66) + vec3(0.22, 0.04, 0.27) * glow;
-  color = vec4(mix(c, FOG, fogAt(distance(vPos, uEye))), 1.0);
+  c *= (0.5 + 0.62 * sun) * uLight;
+  // The walls of a river get dark in the direction of the bottom.
+  c *= mix(1.0, 0.35, clamp(-vPos.y / 0.9, 0.0, 1.0));
+  c = mix(c, vec3(1.0, 0.9, 0.62), glow * 0.42) + vec3(0.14, 0.1, 0.02) * glow;
+  color = vec4(mix(c, uFog, fogAt(distance(vPos, uEye))), 1.0);
 }`;
 
 const WATER_VS = `${COMMON}
@@ -91,18 +100,52 @@ uniform mat4 uViewProj;
 out vec3 vPos;
 void main() { vPos = aPos; gl_Position = uViewProj * vec4(aPos, 1.0); }`;
 
+// The water moves in one direction: to the east. White foam is at the land and around
+// each locked body.
 const WATER_FS = `${COMMON}
 in vec3 vPos;
 uniform vec3 uEye;
 uniform float uTime;
+uniform vec2 uGrid;
+uniform sampler2D uSolid;  // more than 0.9 for a land cell, more than 0.4 for a locked body
 out vec4 color;
+
+float solid(vec2 cell) {
+  if (cell.x < 0.0 || cell.x >= uGrid.x || cell.y < 0.0 || cell.y >= uGrid.y) return 0.0;
+  return step(0.4, texelFetch(uSolid, ivec2(cell), 0).r);
+}
+
 void main() {
   vec2 p = vPos.xz;
-  float a = noise(p * 0.9 + vec2(uTime * 0.35, uTime * 0.1));
-  float b = noise(p * 2.3 - vec2(uTime * 0.5, 0.0));
-  float lines = smoothstep(0.62, 0.7, a * 0.6 + b * 0.4);
-  vec3 c = mix(vec3(0.05, 0.16, 0.22), vec3(0.1, 0.3, 0.36), a) + vec3(0.25, 0.35, 0.35) * lines * 0.5;
-  color = vec4(mix(c, FOG, fogAt(distance(vPos, uEye))), 1.0);
+  float t = uTime;
+  float a = noise(vec2(p.x * 0.45 + t * 0.55, p.y * 1.5));
+  float b = noise(vec2(p.x * 1.2 + t * 1.25, p.y * 3.6 + 7.0));
+  float lines = smoothstep(0.6, 0.74, a * 0.55 + b * 0.45);
+  vec3 c = mix(vec3(0.07, 0.24, 0.33), vec3(0.14, 0.4, 0.47), a) + vec3(0.3, 0.4, 0.4) * lines * 0.45;
+
+  vec3 cell = cellOf(p);
+  float odd = mod(cell.y, 2.0);
+  vec2 d = p - vec2(cell.x + 0.5 * odd, cell.y * ${ROW_STEP});
+  float foam = 0.0;
+  if (solid(cell.xy) > 0.5) {
+    // The water below a locked body: foam between its legs.
+    foam = 0.45;
+  } else {
+    // The distance to each side of the cell that has land or a locked body after it.
+    float e = 1.0;
+    e = min(e, mix(1.0, 0.5 - d.x, solid(cell.xy + vec2(1.0, 0.0))));
+    e = min(e, mix(1.0, 0.5 + d.x, solid(cell.xy + vec2(-1.0, 0.0))));
+    e = min(e, mix(1.0, 0.5 - dot(d, vec2(0.5, ${ROW_STEP})), solid(cell.xy + vec2(odd, 1.0))));
+    e = min(e, mix(1.0, 0.5 - dot(d, vec2(-0.5, ${ROW_STEP})), solid(cell.xy + vec2(odd - 1.0, 1.0))));
+    e = min(e, mix(1.0, 0.5 - dot(d, vec2(0.5, -${ROW_STEP})), solid(cell.xy + vec2(odd, -1.0))));
+    e = min(e, mix(1.0, 0.5 - dot(d, vec2(-0.5, -${ROW_STEP})), solid(cell.xy + vec2(odd - 1.0, -1.0))));
+    float edge = 1.0 - smoothstep(0.0, 0.24, e);
+    foam = edge * (0.35 + 0.65 * noise(vec2(p.x * 5.0 + t * 2.2, p.y * 5.0)));
+    // Small waves go out from the edge.
+    foam += 0.25 * edge * (0.5 + 0.5 * sin(e * 46.0 - t * 4.0));
+  }
+  c = mix(c, vec3(0.93, 0.97, 0.98), clamp(foam, 0.0, 1.0) * 0.8) * uLight;
+  color = vec4(mix(c, uFog, fogAt(distance(vPos, uEye))), 1.0);
 }`;
 
 const BODY_VS = `${COMMON}
@@ -110,7 +153,7 @@ layout(location=0) in vec3 aPos;
 layout(location=1) in vec3 aNormal;
 layout(location=2) in vec3 aMove;    // weight, step group, shade
 layout(location=3) in vec4 iPos;     // x, y, z, scale
-layout(location=4) in vec4 iTurn;    // cos and sin of the heading, not used
+layout(location=4) in vec4 iTurn;    // cos and sin of the heading, how much the legs are out, not used
 layout(location=5) in vec4 iColor;   // red, green, blue, lock
 layout(location=6) in vec4 iStep;    // sin and cos of the walk phase, legs, shake
 layout(location=7) in vec4 aLock;    // the position in a locked body, and the number of the leg
@@ -123,12 +166,12 @@ void main() {
   float weight = aMove.x;
   float lock = iColor.a;
   if (lock > 0.5) {
-    // A locked body is flat and low. Each leg goes to the edge of the cell if a body or a
-    // bank is in its direction. If not, the leg stays short.
+    // A locked body is flat and low. Each leg goes to the edge of the cell if a body or
+    // land is in its direction. If not, the leg stays short. At a lock, the legs go out.
     p = aLock.xyz;
     if (aLock.w >= 0.0) {
       float there = mod(floor(iStep.z / exp2(aLock.w)), 2.0);
-      p.xz *= mix(0.4, 1.0, there);
+      p.xz *= mix(0.4, 1.0, there * iTurn.z);
       n = vec3(0.0, 1.0, 0.0);
     } else {
       n = normalize(vec3(n.x, n.y * 2.0, n.z));
@@ -164,8 +207,8 @@ void main() {
   float rim = pow(1.0 - max(dot(n, view), 0.0), 3.0);
   // A free body shines. A locked body does not: it is a part of a structure.
   float free = 1.0 - vLock;
-  vec3 c = vColor * (0.5 + 0.75 * sun) + vec3(0.5) * shine * free + vec3(0.2, 0.22, 0.25) * rim * free;
-  color = vec4(mix(c, FOG, fogAt(distance(vWorld, uEye))), 1.0);
+  vec3 c = vColor * (0.5 + 0.75 * sun) * uLight + vec3(0.5) * shine * free + vec3(0.2, 0.22, 0.25) * rim * free;
+  color = vec4(mix(c, uFog, fogAt(distance(vWorld, uEye))), 1.0);
 }`;
 
 const SHAPE_VS = `${COMMON}
@@ -178,14 +221,14 @@ layout(location=5) in vec4 iColor;
 layout(location=6) in float aWind;   // how much the vertex moves in the wind
 uniform mat4 uViewProj;
 uniform float uTime;
-out vec3 vNormal; out vec4 vColor; out vec3 vWorld; out float vUp;
+out vec3 vNormal; out vec4 vColor; out vec3 vWorld; out vec3 vLocal;
 void main() {
   vec3 p = aPos * iScale;
   vec3 n = normalize(aNormal / iScale);
   float c = cos(iPos.w), s = sin(iPos.w);
   p = vec3(p.x * c + p.z * s, p.y, -p.x * s + p.z * c);
   n = vec3(n.x * c + n.z * s, n.y, -n.x * s + n.z * c);
-  vUp = aPos.y;
+  vLocal = aPos;
   vWorld = p + iPos.xyz;
   // Grass moves in the wind. The top moves more than the bottom.
   vWorld.x += aWind * sin(uTime * 1.7 + vWorld.x * 1.3 + vWorld.z * 0.9);
@@ -195,10 +238,12 @@ void main() {
 }`;
 
 // Modes: 0 = solid with light, 1 = flat with alpha, 2 = light that fades with height,
-// 3 = solid that also gives light (the food).
+// 3 = solid that also gives light (the food), 4 = the edge of an open cell: a bright
+// part moves slowly along the edge, 5 = a ball of light.
 const SHAPE_FS = `${COMMON}
-in vec3 vNormal; in vec4 vColor; in vec3 vWorld; in float vUp;
+in vec3 vNormal; in vec4 vColor; in vec3 vWorld; in vec3 vLocal;
 uniform vec3 uEye;
+uniform float uTime;
 uniform int uMode;
 out vec4 color;
 void main() {
@@ -207,12 +252,20 @@ void main() {
   float fog = fogAt(distance(vWorld, uEye));
   if (uMode == 0 || uMode == 3) {
     float sun = max(dot(normalize(vNormal), normalize(SUN)), 0.0);
-    c *= 0.5 + 0.7 * sun;
+    c *= (0.5 + 0.7 * sun) * uLight;
     if (uMode == 3) c = c * 0.75 + vColor.rgb * 0.4;
-    c = mix(c, FOG, fog * (uMode == 3 ? 0.35 : 1.0));
+    c = mix(c, uFog, fog * (uMode == 3 ? 0.35 : 1.0));
     alpha = 1.0;
   } else if (uMode == 2) {
-    alpha *= (1.0 - vUp) * (1.0 - vUp) * (1.0 - 0.5 * fog);
+    alpha *= (1.0 - vLocal.y) * (1.0 - vLocal.y) * (1.0 - 0.5 * fog);
+  } else if (uMode == 4) {
+    float turn = atan(vLocal.z, vLocal.x) + vWorld.x * 0.9 + vWorld.z * 0.7;
+    float bright = 0.5 + 0.5 * sin(turn * 2.0 - uTime * 1.8);
+    c = mix(c, vec3(1.0), bright * bright * 0.7);
+    alpha *= (0.45 + 0.55 * bright) * (1.0 - fog);
+  } else if (uMode == 5) {
+    float rim = max(dot(normalize(vNormal), normalize(uEye - vWorld)), 0.0);
+    alpha *= rim * rim;
   } else {
     alpha *= 1.0 - fog;
   }
@@ -242,52 +295,30 @@ function program(gl, vertex, fragment, names) {
   return { id, uniforms };
 }
 
-function perspective(fov, aspect, near, far) {
-  const f = 1 / Math.tan(fov / 2);
-  return [f / aspect, 0, 0, 0, 0, f, 0, 0, 0, 0, (far + near) / (near - far), -1, 0, 0, (2 * far * near) / (near - far), 0];
-}
-
-function multiply(a, b) {
-  const out = new Float32Array(16);
-  for (let column = 0; column < 4; column++) {
-    for (let row = 0; row < 4; row++) {
-      let sum = 0;
-      for (let k = 0; k < 4; k++) sum += a[k * 4 + row] * b[column * 4 + k];
-      out[column * 4 + row] = sum;
-    }
-  }
-  return out;
-}
-
-const normalize = (v) => {
-  const length = Math.hypot(...v) || 1;
-  return v.map((part) => part / length);
-};
-const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
-const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-
 export class Renderer {
   constructor(canvas) {
     this.canvas = canvas;
     // A screen with many pixels does not need smooth edges from the graphics card. Without
     // them, the picture is faster. A phone has such a screen.
-    const antialias = (window.devicePixelRatio || 1) < 2;
+    const antialias = (globalThis.devicePixelRatio || 1) < 2;
     const gl = canvas.getContext("webgl2", { antialias, alpha: false, powerPreference: "high-performance" });
-    if (!gl) throw new Error("This browser has no WebGL2.");
+    if (!gl) throw new Error("WebGL2");
     this.gl = gl;
-    this.scale = Math.min(window.devicePixelRatio || 1, 2);
+    this.scale = Math.min(globalThis.devicePixelRatio || 1, 2);
     this.ready = false;
 
-    this.ground = program(gl, GROUND_VS, GROUND_FS, ["uViewProj", "uEye", "uTime", "uGrid", "uScent", "uBank"]);
-    this.water = program(gl, WATER_VS, WATER_FS, ["uViewProj", "uEye", "uTime"]);
-    this.body = program(gl, BODY_VS, BODY_FS, ["uViewProj", "uEye", "uTime"]);
-    this.shape = program(gl, SHAPE_VS, SHAPE_FS, ["uViewProj", "uEye", "uTime", "uMode"]);
+    const common = ["uViewProj", "uEye", "uTime", "uFog", "uLight", "uFogRange"];
+    this.ground = program(gl, GROUND_VS, GROUND_FS, [...common, "uGrid", "uScent", "uSolid"]);
+    this.water = program(gl, WATER_VS, WATER_FS, [...common, "uGrid", "uSolid"]);
+    this.body = program(gl, BODY_VS, BODY_FS, common);
+    this.shape = program(gl, SHAPE_VS, SHAPE_FS, [...common, "uMode"]);
 
     this.meshes = {
       body: this.upload(shapes.bodyMesh()),
       blob: this.upload(shapes.blobMesh()),
       disc: this.upload(shapes.discMesh()),
       ring: this.upload(shapes.ringMesh()),
+      thin: this.upload(shapes.ringMesh(0.9, 1.0)),
       cell: this.upload(shapes.cellMesh()),
       beam: this.upload(shapes.beamMesh()),
     };
@@ -296,8 +327,9 @@ export class Renderer {
     this.lists = {};
     this.list("bodies", this.meshes.body, BODY_STRIDE);
     for (const [name, mesh] of [
-      ["shadows", "disc"], ["crumbs", "blob"], ["rings", "ring"], ["cells", "cell"],
-      ["food", "blob"], ["beam", "beam"], ["holes", "disc"], ["decks", "cell"], ["marks", "disc"],
+      ["shadows", "disc"], ["crumbs", "blob"], ["rings", "ring"], ["cells", "cell"], ["open", "ring"],
+      ["food", "blob"], ["beam", "beam"], ["holes", "disc"], ["decks", "cell"], ["ripples", "thin"],
+      ["lights", "blob"],
     ]) {
       this.list(name, this.meshes[mesh], MESH_STRIDE);
     }
@@ -305,6 +337,9 @@ export class Renderer {
     this.viewProj = new Float32Array(16);
     this.eye = [0, 1, 0];
     this.basis = null;
+    this.fog = AIR[0].fog;
+    this.light = AIR[0].light;
+    this.fogRange = [24, 62];
   }
 
   // Puts a shape on the graphics card.
@@ -391,13 +426,13 @@ export class Renderer {
       gl.vertexAttribPointer(i, 3, gl.FLOAT, false, 36, i * 12);
     }
 
-    // The water is below all the places where the river can be.
-    const nearEdge = (grid.nearRows - 1) * ROW_STEP;
-    const farEdge = (grid.nearRows + Math.max(...grid.river)) * ROW_STEP;
+    // The water is one flat sheet below all the world. The land hides it where no river is.
     const pad = terrain.columns;
-    const y = -shapes.GAP_DEPTH;
+    const y = -shapes.WATER_DEPTH;
+    const south = -terrain.rowsBefore * ROW_STEP;
+    const north = (grid.rows + terrain.rowsAfter) * ROW_STEP;
     const water = this.upload({
-      vertices: new Float32Array([-pad, y, nearEdge - 1, grid.width + pad, y, nearEdge - 1, grid.width + pad, y, farEdge + 1, -pad, y, farEdge + 1]),
+      vertices: new Float32Array([-pad, y, south, grid.width + pad, y, south, grid.width + pad, y, north, -pad, y, north]),
       indices: new Uint16Array([0, 1, 2, 0, 2, 3]),
       stride: 3,
     });
@@ -410,29 +445,43 @@ export class Renderer {
     gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 12, 0);
     gl.bindVertexArray(null);
 
-    // One number for each cell: 255 for a bank cell. The ground shader draws the lines
-    // of the cells and the scent only there.
-    const bank = new Uint8Array(grid.count);
-    for (let cell = 0; cell < grid.count; cell++) bank[cell] = grid.kind(cell) === GAP ? 0 : 255;
-    this.bankTexture = gl.createTexture();
-    gl.bindTexture(gl.TEXTURE_2D, this.bankTexture);
-    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, grid.width, grid.rows, 0, gl.RED, gl.UNSIGNED_BYTE, bank);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    const texture = (data) => {
+      const id = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, id);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, grid.width, grid.rows, 0, gl.RED, gl.UNSIGNED_BYTE, data);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      return id;
+    };
+    // One number for each cell: 255 for a land cell, 128 for a locked body, 0 for water.
+    // The ground draws the lines of the cells and the scent only on land. The water
+    // draws foam at the land and at the locked bodies.
+    this.solid = new Uint8Array(grid.count);
+    this.solidTexture = texture(this.solid);
+    this.scentTexture = texture(world.scent);
 
-    this.scentTexture = gl.createTexture();
-    gl.bindTexture(gl.TEXTURE_2D, this.scentTexture);
-    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, grid.width, grid.rows, 0, gl.RED, gl.UNSIGNED_BYTE, world.scent);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    // The middle of each river, for the change of the season along the world.
+    this.riverMiddles = grid.rivers.map((river) => (river.start + Math.max(...river.widths) / 2) * ROW_STEP);
 
     this.decorate(world, terrain);
     this.grid = grid;
+    this.setSolid(world);
     this.ready = true;
+  }
+
+  // The land and the locked bodies changed.
+  setSolid(world) {
+    const gl = this.gl;
+    const grid = world.grid;
+    const solid = this.solid;
+    for (let cell = 0; cell < grid.count; cell++) solid[cell] = grid.kind(cell) === GAP ? 0 : 255;
+    for (const cell of world.locked.keys()) solid[cell] = 128;
+    gl.bindTexture(gl.TEXTURE_2D, this.solidTexture);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, grid.width, grid.rows, gl.RED, gl.UNSIGNED_BYTE, solid);
   }
 
   // Puts the shape of the things that do not move on the graphics card.
@@ -464,15 +513,15 @@ export class Renderer {
     this.nest = nest;
     this.grid = grid;
     const clear = (x, z) => Math.hypot(x - nest[0], z - nest[1]) > 1.1;
-    // A random point on one of the two banks, `margin` cells or less outside of the grid.
+    // A random point on land, `margin` cells or less outside of the grid, with its land.
     const point = (margin) => {
       for (;;) {
         const x = -margin + random() * (grid.width + 2 * margin);
         const z = -margin + random() * (zEnd + 2 * margin);
         const row = Math.round(z / ROW_STEP);
         const col = Math.round(x - 0.5 * (row & 1));
-        // Not on the river, and not on the last part of a cell at the river.
-        if (terrain.isBank(row, col) && terrain.isBank(row + 1, col) && terrain.isBank(row - 1, col)) return [x, z];
+        // Not on a river, and not on the last part of a cell at a river.
+        if (terrain.isBank(row, col) && terrain.isBank(row + 1, col) && terrain.isBank(row - 1, col)) return [x, z, grid.zone(row, col)[1]];
       }
     };
     // The grass, the stones and the nest do not move. They are one shape, made one time:
@@ -502,24 +551,36 @@ export class Renderer {
     };
 
     const blade = shapes.grassMesh();
-    for (let i = 0; i < 5200; i++) {
-      const [x, z] = point(7);
+    for (let i = 0; i < 9000; i++) {
+      const [x, z, land] = point(7);
       if (!clear(x, z)) continue;
-      const size = 0.8 + random() * 1.1;
-      const tone = random();
-      add(blade, x, height(x, z), z, random() * 6.28, size, size * (0.8 + random() * 0.6), size, [0.3 + tone * 0.22, 0.52 + tone * 0.16, 0.18 + tone * 0.05], 0.45);
+      const season = shapes.seasonOf(land);
+      // Summer has tall grass. Winter has not much grass.
+      if (season === 3 && random() < 0.6) continue;
+      const size = (0.8 + random() * 1.1) * [1, 1.35, 1, 0.8][season];
+      const tone = random() * 0.22;
+      const color = shapes.SEASONS[season].blade;
+      add(blade, x, height(x, z), z, random() * 6.28, size, size * (0.8 + random() * 0.6), size, [color[0] + tone, color[1] + tone * 0.7, color[2] + tone * 0.3], 0.45);
+    }
+    // Spring has flowers: small points of color.
+    const blob = shapes.blobMesh();
+    for (let i = 0; i < 420; i++) {
+      const [x, z, land] = point(4);
+      if (!clear(x, z) || land > 1) continue;
+      const color = [[1, 0.93, 0.5], [1, 0.75, 0.86], [0.96, 0.96, 1]][Math.floor(random() * 3)];
+      add(blob, x, height(x, z) + 0.13, z, 0, 0.05, 0.04, 0.05, color, 0.3);
     }
 
-    const blob = shapes.blobMesh();
-    for (let i = 0; i < 230; i++) {
+    for (let i = 0; i < 420; i++) {
       // Small stones on the cells, large stones on the land around the cells.
-      const large = i >= 150;
-      const [x, z] = point(large ? 16 : 0);
+      const large = i >= 280;
+      const [x, z, land] = point(large ? 16 : 0);
       const inside = x > -1 && x < grid.width + 1 && z > -1 && z < zEnd + 1;
       if (!clear(x, z) || (large && inside)) continue;
       const size = large ? 0.5 + random() * 1.3 : 0.07 + random() * 0.13;
-      const tone = 0.42 + random() * 0.2;
-      add(blob, x, height(x, z) + size * 0.2, z, random() * 6.28, size * (0.8 + random() * 0.5), size * (0.5 + random() * 0.3), size, [tone, tone * 0.95, tone * 0.9], 0);
+      const rock = shapes.SEASONS[shapes.seasonOf(land)].rock;
+      const tone = 0.95 + random() * 0.4;
+      add(blob, x, height(x, z) + size * 0.2, z, random() * 6.28, size * (0.8 + random() * 0.5), size * (0.5 + random() * 0.3), size, rock.map((part) => part * tone), 0);
     }
     // The nest: a ring of earth around a dark hole.
     for (let i = 0; i < 13; i++) {
@@ -529,8 +590,7 @@ export class Renderer {
     }
     this.setScenery(new Float32Array(vertices), new Uint32Array(indices));
 
-
-    // The places of the pieces of food in the pile and at the nest. The low pieces are first.
+    // The places of the pieces of food in a pile and at the nest. The low pieces are first.
     const heap = (count, radius, top) => {
       const pieces = [];
       for (let i = 0; i < count; i++) {
@@ -540,17 +600,16 @@ export class Renderer {
       }
       return pieces.sort((a, b) => a[1] - b[1]);
     };
-    this.pilePieces = heap(56, 0.95, 0.95);
-    this.nestPieces = heap(40, 0.45, 0.4);
+    this.pilePieces = heap(100, 1.0, 1.05);
+    this.nestPieces = heap(60, 0.5, 0.45);
   }
 
-  // The pile of food, the light above it, and the food at the nest.
+  // The piles of food, the light above each pile, and the food at the nest.
   setFood(world) {
     const grid = world.grid;
-    const at = [grid.x(world.pile.cell), grid.z(world.pile.cell)];
     const data = [];
-    const pileCount = Math.ceil((world.pile.units / Math.max(1, world.pileUnits)) * this.pilePieces.length);
-    const nestCount = Math.min(this.nestPieces.length, world.foodNest);
+    const beams = [];
+    const holes = [this.nest[0], 0.035, this.nest[1], 0, 0.52, 1, 0.52, 0.07, 0.05, 0.04, 0.92];
     const add = (pieces, count, x, z, size) => {
       for (let i = 0; i < count; i++) {
         const [px, py, pz, turn, scale] = pieces[i];
@@ -558,17 +617,19 @@ export class Renderer {
         data.push(x + px, py + s * 0.55, z + pz, turn, s, s * 0.85, s, FOOD_COLOR[0], FOOD_COLOR[1] + 0.08 * Math.sin(i), FOOD_COLOR[2], 1);
       }
     };
-    add(this.pilePieces, pileCount, at[0], at[1], 0.21);
-    add(this.nestPieces, nestCount, this.nest[0] - 1.15, this.nest[1] + 0.25, 0.11);
+    for (const pile of world.piles.values()) {
+      const x = grid.x(pile.cell);
+      const z = grid.z(pile.cell);
+      add(this.pilePieces, Math.min(this.pilePieces.length, Math.ceil(pile.units / 6)), x, z, 0.21);
+      // The light of a pile. The pile that no body can walk to has the tallest light.
+      if (pile.units > 0) beams.push(x, 0.2, z, 0.6, 0.36, pile.far ? 11 : 5, 0.36, 1.0, 0.82, 0.4, pile.far ? 0.4 : 0.2);
+      holes.push(x, 0.02, z, 0, 1.25, 1, 1.25, 0, 0, 0, 0.22);
+    }
+    add(this.nestPieces, Math.min(this.nestPieces.length, Math.ceil(world.foodNest / 4)), this.nest[0] - 1.15, this.nest[1] + 0.25, 0.11);
     this.fill("food", new Float32Array(data), data.length / MESH_STRIDE);
-    const beam = world.pile.units > 0 ? [at[0], 0.2, at[1], 0.6, 0.36, 9, 0.36, 1.0, 0.82, 0.4, 0.34] : [];
-    this.fill("beam", new Float32Array(beam), beam.length / MESH_STRIDE);
-    // The dark hole of the nest and the shadow of the pile.
-    const holes = [
-      this.nest[0], 0.035, this.nest[1], 0, 0.52, 1, 0.52, 0.07, 0.05, 0.04, 0.92,
-      at[0], 0.02, at[1], 0, 1.25, 1, 1.25, 0, 0, 0, 0.22,
-    ];
-    this.fill("holes", new Float32Array(holes), 2);
+    this.fill("beam", new Float32Array(beams), beams.length / MESH_STRIDE);
+    // The dark hole of the nest and the shadow of each pile.
+    this.fill("holes", new Float32Array(holes), holes.length / MESH_STRIDE);
   }
 
   setScent(world) {
@@ -593,30 +654,35 @@ export class Renderer {
   // camera: { x, z, turn, height, distance, fov }. The camera looks at the point x, z on
   // the ground from behind and above.
   setCamera(camera) {
-    const aspect = this.canvas.width / this.canvas.height;
-    const eye = [camera.x - Math.sin(camera.turn) * camera.distance, camera.height, camera.z - Math.cos(camera.turn) * camera.distance];
-    const forward = normalize([camera.x - eye[0], -eye[1], camera.z - eye[2]]);
-    const right = normalize(cross(forward, [0, 1, 0]));
-    const up = cross(right, forward);
-    const view = [
-      right[0], up[0], -forward[0], 0,
-      right[1], up[1], -forward[1], 0,
-      right[2], up[2], -forward[2], 0,
-      -dot(right, eye), -dot(up, eye), dot(forward, eye), 1,
-    ];
-    this.viewProj = multiply(perspective(camera.fov, aspect, 0.5, 140), view);
-    this.eye = eye;
-    this.basis = { forward, right, up, tan: Math.tan(camera.fov / 2), aspect };
+    const view = viewOf(camera, this.canvas.width / this.canvas.height);
+    this.viewProj = view.matrix;
+    this.eye = view.eye;
+    this.basis = view.basis;
+    // The fog starts after the place that the camera looks at.
+    const reach = Math.hypot(camera.height, camera.distance);
+    this.fogRange = [reach + 12, reach + 50];
+    this.setSeason(camera.z);
+  }
+
+  // The season at a place: spring before river 2, then summer, autumn and winter. The
+  // color of the fog and of the light changes across each river.
+  setSeason(z) {
+    let season = 0;
+    this.riverMiddles.forEach((middle, index) => {
+      if (index > 0) season += Math.max(0, Math.min(1, (z - middle) / 9 + 0.5));
+    });
+    const low = Math.min(AIR.length - 1, Math.floor(season));
+    const high = Math.min(AIR.length - 1, low + 1);
+    const part = season - low;
+    this.fog = AIR[low].fog.map((value, i) => value + (AIR[high].fog[i] - value) * part);
+    this.light = AIR[low].light.map((value, i) => value + (AIR[high].light[i] - value) * part);
   }
 
   // The position on the page of a point of the world, or null if the point is behind the camera.
   project(x, y, z) {
-    const m = this.viewProj;
-    const w = m[3] * x + m[7] * y + m[11] * z + m[15];
-    if (w <= 0.01) return null;
-    const px = (m[0] * x + m[4] * y + m[8] * z + m[12]) / w;
-    const py = (m[1] * x + m[5] * y + m[9] * z + m[13]) / w;
-    return [(px * 0.5 + 0.5) * this.canvas.clientWidth, (0.5 - py * 0.5) * this.canvas.clientHeight];
+    const at = project(this.viewProj, x, y, z);
+    if (!at) return null;
+    return [(at[0] * 0.5 + 0.5) * this.canvas.clientWidth, (0.5 - at[1] * 0.5) * this.canvas.clientHeight];
   }
 
   // True if a point on the ground is in the picture, with a margin for the size of a body.
@@ -644,7 +710,7 @@ export class Renderer {
   draw(world, time) {
     const gl = this.gl;
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
-    gl.clearColor(FOG[0], FOG[1], FOG[2], 1);
+    gl.clearColor(this.fog[0], this.fog[1], this.fog[2], 1);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
     if (!this.ready) return;
     gl.enable(gl.DEPTH_TEST);
@@ -656,6 +722,9 @@ export class Renderer {
       gl.uniformMatrix4fv(item.uniforms.uViewProj, false, this.viewProj);
       gl.uniform3fv(item.uniforms.uEye, this.eye);
       gl.uniform1f(item.uniforms.uTime, time);
+      gl.uniform3fv(item.uniforms.uFog, this.fog);
+      gl.uniform3fv(item.uniforms.uLight, this.light);
+      gl.uniform2fv(item.uniforms.uFogRange, this.fogRange);
     };
     const instances = (name) => {
       const list = this.lists[name];
@@ -669,8 +738,8 @@ export class Renderer {
     start(this.ground);
     gl.uniform2f(this.ground.uniforms.uGrid, grid.width, grid.rows);
     gl.activeTexture(gl.TEXTURE1);
-    gl.bindTexture(gl.TEXTURE_2D, this.bankTexture);
-    gl.uniform1i(this.ground.uniforms.uBank, 1);
+    gl.bindTexture(gl.TEXTURE_2D, this.solidTexture);
+    gl.uniform1i(this.ground.uniforms.uSolid, 1);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.scentTexture);
     gl.uniform1i(this.ground.uniforms.uScent, 0);
@@ -678,6 +747,8 @@ export class Renderer {
     gl.drawElements(gl.TRIANGLES, this.terrain.count, this.terrain.type, 0);
 
     start(this.water);
+    gl.uniform2f(this.water.uniforms.uGrid, grid.width, grid.rows);
+    gl.uniform1i(this.water.uniforms.uSolid, 1);
     gl.bindVertexArray(this.waterVao);
     gl.drawElements(gl.TRIANGLES, this.waterMesh.count, this.waterMesh.type, 0);
 
@@ -690,12 +761,14 @@ export class Renderer {
     instances("food");
     instances("crumbs");
 
-    // Flat marks on the ground: they mix with the ground and do not hide the bodies.
+    // Flat marks on the ground and on the water: they mix with the ground and do not
+    // hide the bodies.
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     gl.depthMask(false);
     gl.uniform1i(this.shape.uniforms.uMode, 1);
     instances("holes");
+    instances("ripples");
     instances("decks");
     gl.depthMask(true);
     gl.disable(gl.BLEND);
@@ -710,14 +783,16 @@ export class Renderer {
     gl.uniform1i(this.shape.uniforms.uMode, 1);
     instances("shadows");
 
-    // The marks of the cells where a lock is possible, the marks of the reach, and the
-    // light above the pile.
+    // The marks of the open cells, the cell for a lock, and the lights.
     instances("cells");
     instances("rings");
-    instances("marks");
+    gl.uniform1i(this.shape.uniforms.uMode, 4);
+    instances("open");
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
     gl.uniform1i(this.shape.uniforms.uMode, 2);
     instances("beam");
+    gl.uniform1i(this.shape.uniforms.uMode, 5);
+    instances("lights");
     gl.depthMask(true);
     gl.disable(gl.BLEND);
     gl.bindVertexArray(null);

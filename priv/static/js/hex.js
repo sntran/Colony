@@ -1,25 +1,45 @@
-// The grid of hexagonal cells. This file has the same math as lib/colony/grid.ex.
+// The grid of hexagonal cells. It is the same grid as in lib/colony/grid.ex.
 //
-// A cell is an integer: row * width + column. The rows with an odd number are moved half a
-// cell to the right. The distance between the centers of two cells that touch is 1.
-//
-// The near bank has a straight edge. The river has a width for each column, thus the edge
-// of the far bank is not straight.
+// A cell is an integer: row * width + column. The rows go from the south to the north.
+// The rows with an odd number are half a cell to the right. The world is land 0, river 1,
+// land 1, river 2, and so on.
 
 export const ROW_STEP = Math.sqrt(3) / 2;
 
-export const NEAR = 0;
+export const LAND = 0;
 export const GAP = 1;
-export const FAR = 2;
 
 export class Grid {
-  // river: the width of the river in each column.
-  constructor(width, nearRows, rows, river) {
+  // `rivers` is a list of { start, widths }: the first row of a river and its width in
+  // each column.
+  constructor(width, rows, rivers) {
     this.width = width;
-    this.nearRows = nearRows;
     this.rows = rows;
-    this.river = river;
+    this.rivers = rivers;
     this.count = width * rows;
+    // For each cell: 0 for land, or the number of its river. And the number of its land.
+    this.rivered = new Uint8Array(this.count);
+    this.lands = new Uint8Array(this.count);
+    for (let cell = 0; cell < this.count; cell++) {
+      const row = Math.floor(cell / width);
+      const [river, land] = this.zone(row, cell % width);
+      this.rivered[cell] = river;
+      this.lands[cell] = land;
+    }
+  }
+
+  // [river, land] of a row and a column. Outside of the grid, a river continues with the
+  // width of its first or its last column.
+  zone(row, col) {
+    const c = Math.max(0, Math.min(this.width - 1, col));
+    let land = 0;
+    for (let k = 0; k < this.rivers.length; k++) {
+      const river = this.rivers[k];
+      if (row < river.start) break;
+      if (row < river.start + river.widths[c]) return [k + 1, k + 1];
+      land = k + 1;
+    }
+    return [0, land];
   }
 
   row(cell) {
@@ -31,15 +51,22 @@ export class Grid {
   }
 
   kind(cell) {
-    const row = Math.floor(cell / this.width);
-    if (row < this.nearRows) return NEAR;
-    if (row < this.nearRows + this.river[cell % this.width]) return GAP;
-    return FAR;
+    return this.rivered[cell] === 0 ? LAND : GAP;
   }
 
-  // The row of a river cell, from 1 at the near bank.
+  // The number of the river of a river cell, from 1. For a land cell: 0.
+  river(cell) {
+    return this.rivered[cell];
+  }
+
+  // The number of the land of a land cell, from 0.
+  land(cell) {
+    return this.lands[cell];
+  }
+
+  // The row of a river cell in its river, from 1 at the south edge.
   riverRow(cell) {
-    return Math.floor(cell / this.width) - this.nearRows + 1;
+    return Math.floor(cell / this.width) - this.rivers[this.rivered[cell] - 1].start + 1;
   }
 
   x(cell) {
@@ -51,7 +78,7 @@ export class Grid {
     return Math.floor(cell / this.width) * ROW_STEP;
   }
 
-  // The cell that contains the point, or -1 if the point is not on the grid.
+  // The cell that contains a point, or -1.
   cellAt(x, z) {
     const r = z / ROW_STEP;
     const q = x - r / 2;
@@ -94,19 +121,5 @@ export class Grid {
       if (next >= 0) list.push(next);
     }
     return list;
-  }
-
-  // The cell in the next row that has the same column number: a straight line across the river.
-  straight(cell) {
-    return this.neighbor(cell, Math.floor(cell / this.width) & 1 ? 3 : 2);
-  }
-
-  // True if a river cell touches a bank cell.
-  touchesBank(cell) {
-    for (let direction = 0; direction < 6; direction++) {
-      const next = this.neighbor(cell, direction);
-      if (next >= 0 && this.kind(next) !== GAP) return true;
-    }
-    return false;
   }
 }

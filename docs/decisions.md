@@ -396,3 +396,138 @@ locked bodies that let go, the pile that fills again. The decisions 16 to 18, 20
 112. **The monitor test** has one helper and 5 workers in its world. The world tells the
      monitor three events: a helper locked, a body can lock again, and a player has a new
      body at the nest.
+
+## Plan 0003: The crossing
+
+These are the decisions that the plan does not make. The plan is
+[`0003-the-crossing.md`](plans/0003-the-crossing.md).
+
+### Numbers that I changed
+
+113. **3 units of food make one worker, not 5.** With 5, a new player who locks fast gets
+     to river 4 with 4 spare bodies. Then each lock uses the worker that the nest made a
+     moment before, and the new body is far from the bridge. With 3, the same player gets
+     to river 4 with 20 to 30 spare bodies and never waits. The plan permits this change.
+114. **A player takes food at 0.75 cells from the center of a pile.** A body that walks
+     on a cell beside a pile does not take food. With a larger distance, a player on the
+     way to the next river took 10 units and lost them at the next lock.
+115. **With no bridge, the workers wait 6 columns or less from the column of the pile, not
+     3.** The first body of a bridge can lock 6 columns from the pile. With 3, the first
+     lock of a bridge gave a body that was 5 cells away. The number is `start_columns`:
+     the workers wait on the cells that touch an open cell.
+
+### The world
+
+116. **Each land after a river is 8 rows deep at the widest place of the river.** At a
+     narrower place it is deeper. The world has 96 rows. Each river has a place with its
+     least width and a place with its largest width.
+117. **A position in a message has a step of 0.002 cells.** The world is longer than 64
+     cells, and a position is 16 bits.
+118. **Pile 1 loses units from the first tick of the world**, as the plan says: no body
+     can walk to it. A server that waits one minute for its first player has a pile of
+     240 units. See the report.
+119. **A pile with 0 units stays.** No new pile comes from an empty pile.
+
+### Open cells and locks
+
+120. **The page gets the open cells from the server.** The server sends all the open
+     cells each time a body locks. Thus the page and the server cannot have different
+     rules. The page calculates no support. The marks of the reach of plan 0002 are
+     gone: the open cells show where a lock helps.
+121. **"Forward" is the row after the top row.** A cell of that row is open if it touches
+     the bridge and a body there has support. Support from the far land counts. Thus the
+     last body of a bridge is open as soon as the bridge is one row from the land.
+122. **"Wider" compares the highest support of the top row** before the lock and after
+     it. If the new body is in the top row, its support counts also.
+123. **The colony builds across one river at a time.** River `k + 1` has no open cell
+     before the crossing of river `k`: its pile is not there.
+124. **Each worker is a spare body**, also a worker that carries food. The number at the
+     top is the number of workers. A lock uses the nearest worker with no food. If all
+     the workers carry food, it uses the nearest worker, and the player has the unit of
+     food of that worker.
+125. **A lock that the server refuses makes no error on the screen**: a second player got
+     the cell, or the last spare body. The button is not bright after that.
+
+### Workers
+
+126. **One worker waits on each cell.** The workers that wait go as near to the crossing
+     place as possible. The crossing place is each cell where a body can stand and lock
+     into an open cell: the edge of the land before the first lock, then bodies of the
+     bridge. Thus the workers make a line on the bridge and a crowd behind it, and a
+     lock at each open cell finds a spare body near.
+127. **"One of each three waits" is a count.** The world keeps the number of workers that
+     wait at the number of workers divided by 3, to the next integer. A worker that
+     starts to wait is the worker with no food that is nearest to the crossing place.
+128. **A new pile calls workers.** Without a rule for this, the workers go to the nearest
+     pile, and the first food of pile 4 comes only when piles 1 to 3 are empty: the
+     world does not get complete. Thus:
+     - At a crossing, one of each three workers that waited, and 3 or more, goes across
+       the bridge to the pile. These are the workers at the end of the line. The workers
+       at the start of the line go to the next crossing place. After the last crossing,
+       all of them go to the pile.
+     - Until the first food of a pile is at the nest, 3 workers go to that pile or carry
+       food from it. They are the workers with no food that are nearest to the pile.
+129. **A worker number is not used again in the tick of its lock.** A client then gets
+     "worker gone" and "worker set" of one number in two messages.
+
+### Food and records
+
+130. **The record of a bridge is made at the crossing.** It has the bodies of each name
+     in that bridge, the seconds from the first lock of the bridge to the crossing, the
+     units of the pile at the crossing, and the width of the river in the widest column
+     of the bridge.
+131. **The food of a player counts in the record of the bridge that the colony builds at
+     that time.** Food after the last crossing counts in the last record. The story has
+     all the food of each player.
+132. **A player puts food into the nest at 1.5 cells from the nest.**
+
+### Helpers
+
+133. **The helpers lock in turn.** After its lock, a helper waits until the other helpers
+     had time for theirs. A helper takes food only when it goes for food.
+
+### The page
+
+134. **The arrow shows the way on foot**, not the straight line: it points along the
+     land and the bridges to its target. The order of its rules is the order of the
+     plan: an open cell if the colony has a spare body, then the nest if I carry food,
+     then a pile if the colony has no spare body.
+135. **The way of the arrow does not go across a pile.**
+136. **The body goes around a corner.** If the push of the stick is blocked by water, and
+     the player pushes in the direction of the target of the arrow, the body goes along
+     the way on foot for half a second. Without this, a body on a side body of a wide
+     row cannot get to the open cells with a push "at what I see".
+137. **A client that only looks has no body**: the demo mode and the story.
+138. **The water is 0.3 cells below the land**, not at the bottom of a deep gap. The
+     locked bodies are at the level of the land, a small distance above the water.
+
+### Save
+
+139. **A save file of an older version gets the name `world.bin.v2`** (the number is its
+     version). The server then starts a new world.
+
+### Tests
+
+140. **The script of the new player** is `test/play/newplayer.mjs`. "The body did not
+     move" is: the place of the body in the world changed less than 0.03 cells in 0.1
+     seconds. While the right thumb taps, the left thumb stays where it is.
+141. **The 20 clients with no browser use the code of the page** for the world, the body
+     and the arrow, and the same script. They calculate what a person sees on a screen
+     of 390 x 844 from the camera of a player.
+142. **The table of section 4.5.** "Best" takes the open cell that gives the highest
+     support of the top row. My "Random" row is not the row of the plan: the highest of
+     25 random runs changes with the random numbers. In 3,000 runs at width 10, 13
+     bodies came 2,959 times and 14 bodies 41 times.
+
+### TLA+ contracts
+
+143. **`Bridge.tla` has one river.** The rule for each river of the game is the same. A
+     test makes the contract of river 1 and of river 2 of the real world.
+144. **Two models of a bridge.** `Bridge` and `BridgeWide` let a body lock into each cell
+     where it has support: they check the support rule in all the structures.
+     `BridgeOpen` permits only locks into open cells: it checks the rules of the open
+     cells.
+145. **`BridgeNineRows` has the numbers of the plan**: a river of 9 rows needs 10 bodies,
+     and no bridge stops before the far land. This check needs 80 seconds or more.
+146. **The contract has the number of spare bodies, not the workers.** A lock subtracts
+     one. The nest adds one. The contract permits each number of workers at the start.

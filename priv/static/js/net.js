@@ -6,7 +6,8 @@ import { Socket } from "/vendor/phoenix.mjs";
 
 export class Net {
   // handlers: snapshot(buffer), tick(buffer), you(message), records(list), record(record), status(text)
-  constructor(name, demo, handlers) {
+  // `look` is true for a client that only looks: it gets no body.
+  constructor(name, look, handlers) {
     this.handlers = handlers;
     this.bytes = 0;
     this.delay = 0;
@@ -14,14 +15,14 @@ export class Net {
 
     this.socket = new Socket("/socket", {});
     this.socket.onOpen(() => handlers.status(""));
-    this.socket.onError(() => handlers.status("No connection. The page tries again."));
+    this.socket.onError(() => handlers.status("wait"));
     this.socket.onClose(() => {
       this.ready = false;
-      handlers.status("No connection. The page tries again.");
+      handlers.status("wait");
     });
     this.socket.connect();
 
-    this.channel = this.socket.channel("world", { name, demo });
+    this.channel = this.socket.channel("world", look ? { look: true } : { name });
     // Each message has about 13 bytes more than its data: the headers of the channel and of
     // the WebSocket frame. The count of bytes includes them.
     this.channel.on("s", (buffer) => {
@@ -41,7 +42,7 @@ export class Net {
     });
     this.channel
       .join()
-      .receive("error", () => handlers.status("The server refused the connection."));
+      .receive("error", () => handlers.status("wait"));
   }
 
   // Sends the position of the body. `move` is an ArrayBuffer of 6 bytes.
@@ -72,6 +73,11 @@ export class Net {
     return this.ask("body", { cell });
   }
 
+  // The players with their bodies and their food, for the story.
+  story() {
+    return this.ask("story", {});
+  }
+
   // Measures the time of a message to the server and back.
   ping() {
     if (!this.ready) return;
@@ -87,20 +93,4 @@ export class Net {
     this.bytes = 0;
     return bytes;
   }
-}
-
-export function encodeMove(x, z, heading, scent) {
-  const buffer = new ArrayBuffer(6);
-  const view = new DataView(buffer);
-  const position = (value) => Math.max(0, Math.min(65535, Math.round((value + 1) * 1000)));
-  const turn = Math.round((heading / (2 * Math.PI)) * 256);
-  view.setUint16(0, position(x), true);
-  view.setUint16(2, position(z), true);
-  view.setUint8(4, ((turn % 256) + 256) % 256);
-  view.setUint8(5, scent ? 1 : 0);
-  return buffer;
-}
-
-export function toBase64(buffer) {
-  return btoa(String.fromCharCode(...new Uint8Array(buffer)));
 }

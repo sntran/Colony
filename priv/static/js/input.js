@@ -15,12 +15,9 @@ export class Input {
     // The direction on the screen: x is to the right, y is up. The length is 0 to 1.
     this.x = 0;
     this.y = 0;
-    this.scent = false;
 
     this.keys = new Set();
     this.stick = { id: null, x: 0, y: 0, baseX: 0, baseY: 0 };
-    this.scentKey = false;
-    this.scentButton = false;
 
     this.listenKeys();
     this.listenStick();
@@ -41,20 +38,15 @@ export class Input {
       } else if (event.code === "Space") {
         if (!event.repeat) this.handlers.lock();
         event.preventDefault();
-      } else if (event.key === "Shift") {
-        this.scentKey = true;
       }
       this.refresh();
     });
     window.addEventListener("keyup", (event) => {
       if (moves[event.code]) this.keys.delete(moves[event.code]);
-      if (event.key === "Shift") this.scentKey = false;
       this.refresh();
     });
     window.addEventListener("blur", () => {
       this.keys.clear();
-      this.scentKey = false;
-      this.scentButton = false;
       this.releaseStick();
       this.refresh();
     });
@@ -112,29 +104,16 @@ export class Input {
   }
 
   listenButtons() {
-    const { lock, scent } = this.elements;
+    const { lock } = this.elements;
     lock.addEventListener("pointerdown", (event) => {
       this.handlers.lock();
       event.preventDefault();
     });
-    scent.addEventListener("pointerdown", (event) => {
-      scent.setPointerCapture(event.pointerId);
-      this.scentButton = true;
-      this.refresh();
-      event.preventDefault();
-    });
-    const end = () => {
-      this.scentButton = false;
-      this.refresh();
-    };
-    scent.addEventListener("pointerup", end);
-    scent.addEventListener("pointercancel", end);
-    for (const element of [lock, scent, this.elements.zone]) {
+    for (const element of [lock, this.elements.zone]) {
       element.addEventListener("contextmenu", (event) => event.preventDefault());
     }
   }
 
-  // A short touch or click on the picture, with no movement.
   listenTaps() {
     const { canvas } = this.elements;
     let start = null;
@@ -160,9 +139,9 @@ export class Input {
       x = this.stick.x;
       y = this.stick.y;
     }
+    // The first move of the stick or of a key.
+    if ((x !== 0 || y !== 0) && this.handlers.moved) this.handlers.moved();
     this.x = x;
     this.y = y;
-    this.scent = this.scentKey || this.scentButton;
-    this.elements.scent.classList.toggle("held", this.scent);
   }
 }

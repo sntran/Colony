@@ -30,7 +30,8 @@ defmodule Colony.World do
             now: 0,
             # The time of the first tick of the world.
             start: nil,
-            # Workers: id => %{cell, carry, mode}. Each worker is a spare body.
+            # Workers: id => %{cell, carry, mode}. Each worker is a spare body. The mode is
+            # :idle, :food, :wait, or {:fetch, pile} for a worker that goes to a new pile.
             workers: %{},
             # Worker numbers that are free for a new worker.
             free_ids: [],
@@ -131,7 +132,6 @@ defmodule Colony.World do
       pile_loss: Keyword.fetch!(cfg, :pile_loss_seconds),
       pile_least: Keyword.fetch!(cfg, :pile_least),
       start_columns: Keyword.fetch!(cfg, :start_columns),
-      wait_columns: Keyword.fetch!(cfg, :wait_columns),
       wait_part: Keyword.fetch!(cfg, :wait_part),
       takeover_ticks: round(Keyword.fetch!(cfg, :takeover_seconds) * rate),
       workers_max: Keyword.fetch!(cfg, :workers_max),
@@ -664,6 +664,7 @@ defmodule Colony.World do
   def add_nest_food(world, pile_id, units, by \\ nil) do
     world = flag(%{world | food_nest: world.food_nest + units}, :food)
     world = make_workers(%{world | food_credit: world.food_credit + units})
+    world = %{world | piles: Map.update!(world.piles, pile_id, &%{&1 | fed: true})}
 
     world =
       if by == nil do
@@ -754,7 +755,9 @@ defmodule Colony.World do
       appeared: world.now,
       # The time of the crossing to the land of the pile. Before it, no body can walk to
       # the pile, and the pile loses units.
-      crossed: nil
+      crossed: nil,
+      # True after the first food of the pile got to the nest.
+      fed: false
     }
 
     way = flood(grid, [cell], %{cell => 0}, 1, :infinity, &walkable?(world, &1))
@@ -801,8 +804,32 @@ defmodule Colony.World do
     pile = %{Map.fetch!(world.piles, k) | crossed: world.now}
     world = %{world | piles: Map.put(world.piles, k, pile), stage: k + 1}
     world = make_record(world, k, pile)
-    world = %{world | period: %{}}
+    world = send_to_pile(%{world | period: %{}}, k)
     if k < rivers(world), do: add_pile(world, k + 1), else: flag(world, :food)
+  end
+
+  # At a crossing, the workers that waited go across the bridge. One of each `wait_part`
+  # goes to the new pile: 3 workers or more. These are the workers at the end of the line.
+  # The workers at its start are near the player who made the crossing: they stay spare
+  # bodies for the next bridge. After the last crossing, all of them go to the pile.
+  defp send_to_pile(world, k) do
+    way = Map.fetch!(world.to_pile, k)
+    waiting = for {_id, %{mode: :wait}} = entry <- world.workers, do: entry
+
+    count =
+      if k == rivers(world),
+        do: length(waiting),
+        else: max(3, ceil(length(waiting) / world.p.wait_part))
+
+    workers =
+      waiting
+      |> Enum.sort_by(fn {id, worker} -> {Map.get(way, worker.cell, 1_000_000), id} end, :desc)
+      |> Enum.take(count)
+      |> Enum.reduce(world.workers, fn {id, worker}, workers ->
+        Map.put(workers, id, %{worker | mode: {:fetch, k}})
+      end)
+
+    %{world | workers: workers}
   end
 
   defp make_record(world, k, pile) do
@@ -1019,32 +1046,22 @@ defmodule Colony.World do
     end
   end
 
-  # The number of steps on foot to the crossing place: the top row of the bridge that is
-  # not complete. With no bridge: the edge of the land, near the column of the pile.
+  # The number of steps on foot to the crossing place: the cells where a body can stand
+  # and lock into an open cell. With no bridge, these are the cells at the edge of the
+  # land, near the column of the pile. With a bridge, they are bodies of the bridge.
   defp refresh_front(world) do
-    case far_pile(world) do
-      nil ->
-        %{world | front: %{}}
+    sources =
+      for cell <- world.open,
+          to <- Grid.neighbors(world.grid, cell),
+          walkable?(world, to),
+          uniq: true,
+          do: to
 
-      pile ->
-        grid = world.grid
-
-        sources =
-          case bridge(world, pile.id) do
-            [] ->
-              row = Grid.edge_row(grid, pile.id)
-
-              for col <- 0..(grid.width - 1),
-                  abs(col - pile.col) <= world.p.wait_columns,
-                  do: Grid.cell(grid, row, col)
-
-            cells ->
-              top = cells |> Enum.map(&Grid.row(grid, &1)) |> Enum.max()
-              Enum.filter(cells, &(Grid.row(grid, &1) == top))
-          end
-
-        start = Map.new(sources, &{&1, 0})
-        %{world | front: flood(grid, sources, start, 1, :infinity, &walkable?(world, &1))}
+    if sources == [] do
+      %{world | front: %{}}
+    else
+      start = Map.new(sources, &{&1, 0})
+      %{world | front: flood(world.grid, sources, start, 1, :infinity, &walkable?(world, &1))}
     end
   end
 

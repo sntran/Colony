@@ -1,8 +1,8 @@
 #!/bin/sh
 # The runner part of .github/workflows/play-session.yml: the game server,
 # and a quick tunnel of Cloudflare to it. The address goes into the summary
-# of the job. At the end, the world file and the records of the bridges are
-# in $RUNNER_TEMP/session.
+# of the job. At the end, the world file, the records of the bridges and the
+# story are in $RUNNER_TEMP/session.
 #
 # The method is the method of scripts/remote_ssh_runner.sh in sntran/BEAM.com.
 #
@@ -75,10 +75,10 @@ cleanup() {
     fi
     if [ -f "$OUT/world.bin" ]; then
         COLONY_SAVE_FILE=$OUT/world.bin mix colony.records > "$OUT/records.json" 2>> "$log"
-        echo "play session: the world file and the records are in $OUT"
+        echo "play session: the world file, the records and the story are in $OUT"
         {
             echo
-            echo "The session is at its end. The records of the bridges:"
+            echo "The session is at its end. The records of the bridges and the story:"
             echo
             echo '```json'
             cat "$OUT/records.json"
@@ -148,13 +148,16 @@ fi
 {
     echo "## Colony play session"
     echo
-    echo "Open this address on a phone or a computer:"
+    echo "The game. Open this address on a phone or a computer:"
     echo
     echo "**https://$host/**"
     echo
+    echo "The story of the colony, with no body in the world:"
+    echo
+    echo "**https://$host/?story=1**"
+    echo
     echo "- The session runs for $MINUTES minutes, with $WORKERS workers and $HELPERS helpers at the start."
-    echo "- https://$host/?demo=1 shows the demo mode. https://$host/?stats=1 shows the numbers of the page."
-    echo "- At the end, the artifact of this run has the world file and the records of the bridges."
+    echo "- At the end, the artifact of this run has the world file, the records of the bridges and the story."
 } >> "$summary"
 echo "play session: https://$host/ for $MINUTES minutes, $WORKERS workers, $HELPERS helpers"
 

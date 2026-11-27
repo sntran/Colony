@@ -265,27 +265,40 @@ export function beamMesh() {
 }
 
 // ---------------------------------------------------------------------------
-// The ground: two banks, the walls of the river and the land around them.
+// The ground: the lands, the walls of the rivers and the land around the grid.
 //
-// Each bank cell is one hexagon, thus the edge of the ground is exactly the edge of the
+// Each land cell is one hexagon, thus the edge of the ground is exactly the edge of the
 // cells where a body can be. Each vertex has: position (3), normal (3) and color (3).
 
-export const GAP_DEPTH = 3.4;
+// The water is this far below the ground.
+export const WATER_DEPTH = 0.3;
+// The walls of a river go this far down, below the water.
+const WALL_DEPTH = 1.1;
 
 // Columns and rows of land around the grid. The fog hides the end of this land.
 const LAND_COLUMNS = 20;
 const LAND_ROWS_BEFORE = 16;
 const LAND_ROWS_AFTER = 12;
 
+// Four lands, one year. Land 0 and land 1 are spring, land 2 is summer, land 3 is autumn
+// and land 4 is winter. Each season has the colors of the grass (dark and light), of the
+// dry ground, of the rock, of the blades of grass, and the part of the ground that is dry.
+export const SEASONS = [
+  { grass: [0.3, 0.5, 0.2], light: [0.44, 0.6, 0.24], dirt: [0.5, 0.4, 0.27], rock: [0.42, 0.37, 0.33], blade: [0.32, 0.56, 0.2], dry: 0.44 },
+  { grass: [0.2, 0.42, 0.14], light: [0.36, 0.52, 0.16], dirt: [0.66, 0.58, 0.3], rock: [0.45, 0.4, 0.33], blade: [0.26, 0.5, 0.14], dry: 0.5 },
+  { grass: [0.56, 0.36, 0.12], light: [0.72, 0.5, 0.15], dirt: [0.42, 0.28, 0.18], rock: [0.4, 0.34, 0.3], blade: [0.78, 0.45, 0.12], dry: 0.52 },
+  { grass: [0.8, 0.84, 0.89], light: [0.93, 0.95, 0.98], dirt: [0.56, 0.6, 0.66], rock: [0.46, 0.48, 0.53], blade: [0.7, 0.76, 0.8], dry: 0.6 },
+];
+
+// The season of a land: 0 spring, 1 summer, 2 autumn, 3 winter.
+export const seasonOf = (land) => Math.max(0, Math.min(3, land - 1));
+
 export function terrainMesh(grid, seed) {
   const noise = noiseFrom(seed);
   const size = 1 / Math.sqrt(3);
   const zEnd = (grid.rows - 1) * ROW_STEP;
 
-  // The width of the river in a column. Outside of the grid, the river continues with
-  // the width of the first or the last column.
-  const river = (col) => grid.river[Math.max(0, Math.min(grid.width - 1, col))];
-  const isBank = (row, col) => row < grid.nearRows || row >= grid.nearRows + river(col);
+  const isBank = (row, col) => grid.zone(row, col)[0] === 0;
 
   // The height and the color of the ground at a point.
   const height = (x, z) => {
@@ -294,15 +307,16 @@ export function terrainMesh(grid, seed) {
     const hills = Math.min(1, outside / 9);
     return (noise(x * 0.35, z * 0.35) - 0.5) * 0.05 + hills * hills * (0.6 + 2.2 * noise(x * 0.11 + 3, z * 0.11));
   };
-  const color = (x, z, wall) => {
+  const color = (x, z, wall, land) => {
+    const season = SEASONS[seasonOf(land)];
     const patch = noise(x * 0.23 + 40, z * 0.23 + 11);
     const fine = noise(x * 1.7, z * 1.7 + 30);
-    const grass = [0.3 + 0.1 * fine, 0.47 + 0.1 * fine, 0.2 + 0.04 * fine];
-    const dirt = [0.5, 0.4, 0.27];
-    const rock = [0.42 - wall * 0.05, 0.37 - wall * 0.05, 0.33 - wall * 0.04];
-    const d = Math.max(0, Math.min(1, (patch - 0.56) * 5));
-    const mixed = [0, 1, 2].map((i) => grass[i] + (dirt[i] - grass[i]) * d);
-    return [0, 1, 2].map((i) => mixed[i] + (rock[i] - mixed[i]) * wall);
+    const d = Math.max(0, Math.min(1, (patch - season.dry) * 5));
+    return [0, 1, 2].map((i) => {
+      const grass = season.grass[i] + (season.light[i] - season.grass[i]) * fine;
+      const mixed = grass + (season.dirt[i] - grass) * d;
+      return mixed + (season.rock[i] - wall * 0.05 - mixed) * wall;
+    });
   };
   // The normal of the ground at a point, from the height near it.
   const normal = (x, z) => {
@@ -331,7 +345,8 @@ export function terrainMesh(grid, seed) {
 
   for (let row = -LAND_ROWS_BEFORE; row < grid.rows + LAND_ROWS_AFTER; row++) {
     for (let col = -LAND_COLUMNS; col < grid.width + LAND_COLUMNS; col++) {
-      if (!isBank(row, col)) continue;
+      const [river, land] = grid.zone(row, col);
+      if (river !== 0) continue;
       const cx = col + 0.5 * (row & 1);
       const cz = row * ROW_STEP;
       const corners = [];
@@ -346,10 +361,10 @@ export function terrainMesh(grid, seed) {
         const z = cz + Math.sin(angle) * size;
         // The ground near the river is rock.
         const edge = walls[i] || walls[(i + 5) % 6] ? 0.55 : 0;
-        corners.push({ x, z, y: height(x, z), index: push(x, height(x, z), z, normal(x, z), color(x, z, edge)) });
+        corners.push({ x, z, y: height(x, z), index: push(x, height(x, z), z, normal(x, z), color(x, z, edge, land)) });
       }
       const rim = walls.some(Boolean) ? 0.25 : 0;
-      const center = push(cx, height(cx, cz), cz, normal(cx, cz), color(cx, cz, rim));
+      const center = push(cx, height(cx, cz), cz, normal(cx, cz), color(cx, cz, rim, land));
       for (let i = 0; i < 6; i++) indices.push(center, corners[(i + 1) % 6].index, corners[i].index);
 
       // The wall of the river below each side that touches the river, with rough rock.
@@ -360,15 +375,15 @@ export function terrainMesh(grid, seed) {
         const out = [(a.x + b.x) / 2 - cx, (a.z + b.z) / 2 - cz];
         const length = Math.hypot(...out);
         const n = [out[0] / length, 0.25, out[1] / length];
-        const parts = 3;
+        const parts = 2;
         let before = null;
         for (let part = 0; part <= parts; part++) {
           const t = part / parts;
           const line = [a, b].map((corner) => {
-            const rough = (noise(corner.x * 0.9 + 70, corner.z * 0.9 + t * 3.1) - 0.5) * 0.3 * Math.sin(t * Math.PI);
-            const x = corner.x + n[0] * (0.16 * t + rough);
-            const z = corner.z + n[2] * (0.16 * t + rough);
-            return push(x, corner.y - (corner.y + GAP_DEPTH * 1.15) * t, z, n, color(x, z, 1));
+            const rough = (noise(corner.x * 0.9 + 70, corner.z * 0.9 + t * 3.1) - 0.5) * 0.12 * Math.sin(t * Math.PI);
+            const x = corner.x + n[0] * (0.1 * t + rough);
+            const z = corner.z + n[2] * (0.1 * t + rough);
+            return push(x, corner.y - (corner.y + WALL_DEPTH) * t, z, n, color(x, z, 1, land));
           });
           if (before) indices.push(before[0], before[1], line[0], before[1], line[1], line[0]);
           before = line;
