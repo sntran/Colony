@@ -595,3 +595,142 @@ These are the decisions that the plan does not make. The plan is
 164. **The workflow file is on `main` and on the branch.** The file on `main` gets the
      branch of its input and runs `scripts/play_session.sh` of that branch. It makes
      sure that the branch has `mix.exs` and the script.
+
+## Plan 0004: The road north
+
+### Numbers
+
+165. **The factor of the size of a pile is 1.2, not 1.5** (section 4.3). With 1.5, the
+     slow player of play test 1 had 70 and 87 spare bodies at the crossing of river 5
+     (seeds 2027 and 11): more than 60. I tried two changes with the slow script and no
+     browser, for 3 seeds. With 4 carriers for each crossing, seed 11 still had 69. With
+     the factor 1.2, the seeds had 38, 39 and 27, and river 5 came at the same time. The
+     other three numbers stay: 12 carriers at the start, 8 more at each crossing, and 5
+     units for one spare body.
+166. **The table of the open cells** uses the seeds 1 to 200 and the start columns 24 to
+     36 of a river with the same width in all its columns. `mix colony.table` makes it
+     again. The normal tests make the table with 25 runs. The test with 200 runs has the
+     tag `slow`. A river narrower than 5 rows (only in tests) uses its width for `B` and
+     `R`: a straight line is the best bridge there.
+167. **The sizes of the piles are whole units**: `round(5 × 1.2 × R)` and
+     `round(5 × 1.1 × B)`. Pile 1 is 114 units with 88 at the least. Pile 6 and each pile
+     after it are 600 units with 517 at the least.
+
+### Workers
+
+168. **The look of the two kinds.** A carrier is 0.78 times the size of the body of a
+     player and almost black. A spare body is the size of the body of a player and red
+     brown. A carrier with food has a yellow piece in front of its head, and a carrier
+     with an egg has a white egg.
+169. **The eggs.** At a crossing, the 8 new carriers come out of the new nest and go for
+     food at once. Each older carrier with no food goes to the old nest for an egg and
+     brings it to the new nest. A carrier with food brings it to the new nest first.
+170. **The crowd at the crossing place spreads.** A spare body that cannot go ahead goes
+     to a free cell beside it that has a free cell in front of it. Without this rule, all
+     the spare bodies stood in one line behind the first body.
+171. **The way to the crossing place goes 30 steps past the nest.** A spare body that is
+     farther away walks to the nest first. Thus a lock in a long world does not make a
+     map of all the world.
+172. **A carrier goes to the pile with food that is nearest to the carrier**, not to the
+     nest. After a crossing, carriers can be on long trips to old piles. Automatic test 1
+     thus checks that the time with no food is not longer than one trip to the farthest
+     pile with food and 5 seconds.
+
+### The nest
+
+173. **The cell of the new nest** is 3 rows south of the body of the bridge with the lowest
+     lock number, in its column. If that cell has a pile, the nest is on the nearest free
+     land cell. The row is 0 or more.
+174. **An old nest** is a low ring of earth with an empty hole, and the number of its land
+     as a label.
+
+### Piles
+
+175. **The column of a pile comes from the seed and the number of the pile** (a hash), not
+     from the random state of the world. One seed gives the same piles each time, and
+     automatic test 7 checks the piles of 20 rivers from the grid only.
+176. **A way on foot does not go across the cell of a pile.** The guide of the page and
+     of the server use the same rule.
+
+### The world stops
+
+177. **A helper is not a player.** With only helpers in the world, the server makes no
+     tick. A page that only looks is not a player.
+178. **Each save has its own temporary file.** Before, the save when the last player goes
+     and the save at the stop used the same file, and one of them failed.
+
+### The guide
+
+179. **The nearest target** is the target with the fewest steps on foot from the body.
+     With the same number of steps, the target nearer in a straight line comes first,
+     then the cell with the lower number. The page and the server have the same rule. A
+     test compares them for 225 places of a body.
+180. **The nest rule needs a way on foot to the nest.** The pile rule needs a pile on a
+     land that the colony crossed to.
+181. **"Players" in the rule "share the work"** are the players and the helpers in the
+     world.
+182. **The button "wait"** shows when no rule of the guide applies and no other state of
+     the button applies. With no spare body, the button shows the body sign with 0: it
+     is first in the table of section 4.7.
+183. **The mark** is two rings in my color on the target. They turn, and they get larger
+     and smaller. The arrow at the edge points along the way on foot, not in a straight
+     line to the target.
+184. **The gain of an open cell.** A cell ahead has the gain 0. In the "wider" phase,
+     the server sends the increase of the highest support of the top row. The page makes
+     the cells with the largest gain bright. When all the cells are ahead, all are bright.
+
+### Messages
+
+185. **A cell and a position along the world are u32** in all the messages. A position
+     is `(value + 1) × 500`. The test makes a world of 32 rivers (more than 1,000 rows).
+186. **A tick sends only the changes**: the supports that changed and the piles that
+     changed. Section 15 of a tick sends the new rivers when the grid grows.
+187. **The secret number** is 32 hexadecimal characters from `crypto.getRandomValues`, in
+     local storage. The server keeps only its SHA-256. A join with no number makes a new
+     person. The server accepts 16 to 64 letters and digits.
+
+### The world with no end
+
+188. **The grid grows at each crossing**: the server makes the grid again with the
+     rivers as far as two rivers after the newest pile. The cells of the old grid do not
+     change. For 23 rivers this takes about 130 ms, one time at a crossing.
+189. **The page makes the world in parts of 24 rows.** It draws the parts that the camera
+     sees before the end of the fog. The grass and the stones of a part come from the
+     seed and the number of the part. When the grid grows, the page makes the new parts
+     and the part at the old north end again.
+190. **The seasons.** Land 0 and land 1 are spring, then summer, autumn and winter, and
+     then spring again. The fog and the light change across each river.
+191. **The end of the story** shows the full world above the list of the names. The
+     picture of a long world has parts, from the north to the south, each with the full
+     width of the world. The picture has 6,000 pixels in its length at the most.
+192. **The names in the picture** are in two columns only when each name and its numbers
+     fit. If not, they are in one column. The list on the screen has one column.
+193. **The story button flashes 7 times** after a crossing.
+194. **The demo page** shows the colony from the nest to the next river, not from land 0.
+
+### My name
+
+195. **A tap on my name opens the panel.** Before, a tap gave a new name at once. The
+     button with two arrows in the panel gives the new name. The panel asks the server
+     for its numbers each 2 seconds while it is open.
+
+### The play session
+
+196. **The input `workers` of the workflow is not used.** The config has the carriers and
+     the spare bodies. The plan permits only one change on `main`, thus the input stays
+     in the workflow file.
+197. **The session with no player** does not tick: the artifact of a session with no
+     player has a world with no lock.
+
+### Tests
+
+198. **The contract has one river.** The world now gets the next river at the crossing.
+     Thus the monitor test stops at the crossing, and the test world of the contract
+     takes the helpers away there.
+199. **The world of the load test** comes from fast locks into random open cells, with no
+     walk, until the colony crossed 20 rivers and has 2,000 locked bodies. With random
+     cells the bridges are narrow: the world has 25 crossings when it gets to 2,000
+     bodies.
+200. **The fast clients of play test 2 have no browser.** They use the code of the page
+     (the world, the guide, the button) and the script of the new player. The time with
+     no guide and no bright button counts from 6.5 seconds after the join.

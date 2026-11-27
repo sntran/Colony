@@ -157,7 +157,7 @@ defmodule Colony.ProtocolTest do
 
     assert %{
              "id" => 1,
-             "size" => 143,
+             "size" => 114,
              "names" => [
                %{"name" => "Helper " <> _, "helper" => true, "bodies" => _, "food" => 0} | _
              ]

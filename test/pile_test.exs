@@ -36,20 +36,20 @@ defmodule Colony.PileTest do
       for {width, best} <- @table_best, do: assert(world.p.bridge_best[width] == best)
       for {width, random} <- @table_random, do: assert(world.p.bridge_random[width] == random)
 
-      # Pile k pays for the bridge across river k + 1: 5 * 1.5 * R and 5 * 1.1 * B for the
+      # Pile k pays for the bridge across river k + 1: 5 * 1.2 * R and 5 * 1.1 * B for the
       # largest width of that river. River 7 and each river after it are 27 rows wide at
       # the most.
-      assert World.pile_size(world, 1) == {round(5 * 1.5 * 19), round(5 * 1.1 * 16)}
-      assert World.pile_size(world, 2) == {round(5 * 1.5 * 34), round(5 * 1.1 * 25)}
-      assert World.pile_size(world, 3) == {round(5 * 1.5 * 54), round(5 * 1.1 * 41)}
-      assert World.pile_size(world, 4) == {round(5 * 1.5 * 69), round(5 * 1.1 * 56)}
-      assert World.pile_size(world, 5) == {round(5 * 1.5 * 85), round(5 * 1.1 * 73)}
+      assert World.pile_size(world, 1) == {round(5 * 1.2 * 19), round(5 * 1.1 * 16)}
+      assert World.pile_size(world, 2) == {round(5 * 1.2 * 34), round(5 * 1.1 * 25)}
+      assert World.pile_size(world, 3) == {round(5 * 1.2 * 54), round(5 * 1.1 * 41)}
+      assert World.pile_size(world, 4) == {round(5 * 1.2 * 69), round(5 * 1.1 * 56)}
+      assert World.pile_size(world, 5) == {round(5 * 1.2 * 85), round(5 * 1.1 * 73)}
 
       for k <- 6..30 do
-        assert World.pile_size(world, k) == {round(5 * 1.5 * 100), round(5 * 1.1 * 94)}
+        assert World.pile_size(world, k) == {round(5 * 1.2 * 100), round(5 * 1.1 * 94)}
       end
 
-      assert World.pile_size(world, 1) == {143, 88}
+      assert World.pile_size(world, 1) == {114, 88}
 
       {world, id} = World.join(World.new(Sim.cfg(spare: 200)), "Tester")
       world = Enum.reduce(1..3, world, fn k, world -> Sim.cross!(world, id, k) end)
@@ -63,9 +63,10 @@ defmodule Colony.PileTest do
 
     test "a pile that no body can walk to loses 1 unit each second, down to its least units" do
       world = World.new(Sim.cfg())
-      assert Sim.run(world, 100).piles[1].units == 133
-      assert Sim.run(world, 500).piles[1].units == 93
-      assert Sim.run(world, 600).piles[1].units == 88
+      # Pile 1 has 114 units, and 88 at the least.
+      assert Sim.run(world, 100).piles[1].units == 104
+      assert Sim.run(world, 200).piles[1].units == 94
+      assert Sim.run(world, 300).piles[1].units == 88
       assert Sim.run(world, 2000).piles[1].units == 88
     end
 

@@ -84,7 +84,7 @@ config :colony, :game,
   # `k + 1`. With R and B of the table for the largest width of that river:
   # the size of the pile is food_per_body * pile_factor * R, and the pile does not lose
   # units below food_per_body * pile_least_factor * B.
-  pile_factor: 1.5,
+  pile_factor: 1.2,
   pile_least_factor: 1.1,
   pile_rows_from_river: 3,
   # Pile 1 is this many columns or less from the column of the nest.
