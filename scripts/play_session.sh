@@ -138,6 +138,12 @@ until [ "$(curl -s -o /dev/null -w '%{http_code}' "https://$host/")" = 200 ]; do
     fi
     sleep 2
 done
+# With no tunnel, no player can open the address: the job fails here.
+if ! kill -0 "$tunnel_pid" 2>/dev/null; then
+    cat "$tunnel_log"
+    echo "play session: the tunnel stopped" >&2
+    exit 1
+fi
 
 {
     echo "## Colony play session"
@@ -152,9 +158,18 @@ done
 } >> "$summary"
 echo "play session: https://$host/ for $MINUTES minutes, $WORKERS workers, $HELPERS helpers"
 
-# Wait for the end of the session, or for the end of the server.
+# Wait for the end of the session, or for the end of the server or of the tunnel.
 end=$(( $(date +%s) + MINUTES * 60 ))
-while [ "$(date +%s)" -lt "$end" ] && kill -0 "$server_pid" 2>/dev/null; do
+while [ "$(date +%s)" -lt "$end" ]; do
+    if ! kill -0 "$server_pid" 2>/dev/null; then
+        echo "play session: the server stopped" >&2
+        exit 1
+    fi
+    if ! kill -0 "$tunnel_pid" 2>/dev/null; then
+        tail -n 20 "$tunnel_log"
+        echo "play session: the tunnel stopped" >&2
+        exit 1
+    fi
     sleep 5
 done
 echo "play session: the time is at its end"

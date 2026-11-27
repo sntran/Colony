@@ -250,9 +250,13 @@ async function alone(browser) {
   result.record = now.records[0];
 
   // A place 12 rows wide: the player goes there along the bank with Scent and builds.
-  const column = first.grid.river
+  // The columns near it are 12 rows wide or more. Thus a bridge there cannot end on the
+  // bank of a narrower column: it has bodies in 12 rows.
+  const river = first.grid.river;
+  const wide = (col) => [-3, -2, -1, 1, 2, 3].every((step) => (river[col + step] || 99) >= 12);
+  const column = river
     .map((width, col) => ({ width, col }))
-    .filter((place) => place.width === 12 && place.col > 2 && place.col < grid.width - 3)
+    .filter((place) => place.width === 12 && place.col > 2 && place.col < grid.width - 3 && wide(place.col))
     .sort((a, b) => Math.abs(a.col - grid.col(pile.cell)) - Math.abs(b.col - grid.col(pile.cell)))[0].col;
   const before = Object.keys((await session.state()).locked).length;
   const wideEdge = edgeCell(grid, first, column);
@@ -276,6 +280,15 @@ async function alone(browser) {
   now = await session.state();
   check(Object.keys(now.locked).length === before + result.wideBodies, "each lock of the player made one body");
   check(result.wideBodies <= 24, `the player crosses 12 rows with 24 bodies or fewer: ${result.wideBodies}`);
+  // The rows of the river that have a body of this bridge, and the bodies in each row.
+  const wideRows = {};
+  for (const cell of bridgeOf(grid, now, wideEdge)) {
+    const row = grid.row(cell) - first.grid.nearRows + 1;
+    wideRows[row] = (wideRows[row] || 0) + 1;
+  }
+  result.wideRows = Object.keys(wideRows).length;
+  check(result.wideRows >= 12, `the bridge has bodies in 12 rows: ${result.wideRows}`);
+  result.wideLines = Object.values(wideRows).join(" ");
   await me.walk(grid.cell(first.grid.nearRows + 12, column));
   await me.rest();
   await session.shot(path.join(SHOTS, "07-across-12-rows.jpg"));
