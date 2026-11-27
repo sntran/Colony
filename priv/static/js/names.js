@@ -14,6 +14,7 @@ const SECOND = [
 const KEY = "colony.name";
 
 // The name stays in local storage. If storage is not available, the name is new at each load.
+// The name of this player. It stays the same on this device.
 export function myName() {
   try {
     const saved = localStorage.getItem(KEY);
@@ -21,6 +22,11 @@ export function myName() {
   } catch (_) {
     // Continue with a new name.
   }
+  return newName();
+}
+
+// A new random name for this player, for this device.
+export function newName() {
   const pick = (list) => list[Math.floor(Math.random() * list.length)];
   const name = `${pick(FIRST)} ${pick(SECOND)} ${10 + Math.floor(Math.random() * 90)}`;
   try {

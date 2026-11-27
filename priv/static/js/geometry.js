@@ -224,6 +224,19 @@ export function ringMesh(inner = 0.74, outer = 0.94) {
   return plain(vertices, indices);
 }
 
+// A round ring, flat on the water.
+export function circleMesh(inner = 0.9, outer = 1.0, sides = 28) {
+  const vertices = [];
+  const indices = [];
+  for (let i = 0; i < sides; i++) {
+    const angle = (i / sides) * 2 * Math.PI;
+    vertices.push(Math.cos(angle) * inner, 0, Math.sin(angle) * inner, 0, 1, 0, Math.cos(angle) * outer, 0, Math.sin(angle) * outer, 0, 1, 0);
+    const next = ((i + 1) % sides) * 2;
+    indices.push(i * 2, next, i * 2 + 1, i * 2 + 1, next, next + 1);
+  }
+  return plain(vertices, indices);
+}
+
 // A full cell.
 export function cellMesh(size = 0.9) {
   const vertices = [0, 0, 0, 0, 1, 0];
@@ -277,8 +290,8 @@ const WALL_DEPTH = 1.1;
 
 // Columns and rows of land around the grid. The fog hides the end of this land.
 const LAND_COLUMNS = 20;
-const LAND_ROWS_BEFORE = 16;
-const LAND_ROWS_AFTER = 12;
+const LAND_ROWS_BEFORE = 30;
+const LAND_ROWS_AFTER = 20;
 
 // Four lands, one year. Land 0 and land 1 are spring, land 2 is summer, land 3 is autumn
 // and land 4 is winter. Each season has the colors of the grass (dark and light), of the

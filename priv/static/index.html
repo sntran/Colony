@@ -108,6 +108,28 @@
   body.keys #zone, body.keys #lock { display: none; }
   body.touch #keys { display: none; }
   body.look #zone, body.look #lock, body.look #keys, body.look #me, body.look #you, body.look #arrow { display: none; }
+
+  /* The story: the bodies appear, then the world from above with the names. */
+  body.story #zone, body.story #lock, body.story #keys, body.story #you, body.story #arrow, body.story #top, body.story #card, body.story #info, body.story #stats { display: none !important; }
+  #storyTools { position: fixed; right: calc(10px + env(safe-area-inset-right)); top: calc(10px + env(safe-area-inset-top)); display: flex; gap: 8px; z-index: 6; }
+  #storyTools button { width: 44px; height: 44px; border-radius: 12px; border-width: 0; background: rgba(20, 28, 24, 0.7); display: flex; align-items: center; justify-content: center; touch-action: manipulation; }
+  #storyTools button svg { width: 24px; height: 24px; }
+  #storyCount { position: fixed; left: calc(12px + env(safe-area-inset-left)); top: calc(12px + env(safe-area-inset-top)); z-index: 6; display: flex; align-items: center; gap: 6px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  #storyCount .sign { width: 20px; height: 20px; }
+  #storyEnd { position: fixed; left: 0; right: 0; bottom: 0; max-height: 30%; overflow-y: auto; -webkit-overflow-scrolling: touch; background: linear-gradient(rgba(14, 22, 19, 0), rgba(14, 22, 19, 0.88) 26px); padding: 34px 14px calc(12px + env(safe-area-inset-bottom)); z-index: 5; animation: show2 0.6s ease-out; }
+  @keyframes show2 { from { opacity: 0; } }
+  #storyHead { display: flex; align-items: center; gap: 14px; font-weight: 700; font-size: 16px; font-variant-numeric: tabular-nums; margin: 0 auto 8px; max-width: 420px; }
+  #storyHead span { display: flex; align-items: center; gap: 5px; }
+  #storyHead .date { margin-left: auto; font-weight: 500; font-size: 13px; opacity: 0.8; }
+  #storyNames { list-style: none; margin: 0 auto 10px; padding: 0; max-width: 420px; display: grid; grid-template-columns: 1fr 1fr; gap: 3px 14px; font-size: 13px; font-variant-numeric: tabular-nums; }
+  #storyNames.few { grid-template-columns: 1fr; }
+  #storyNames li { display: flex; align-items: center; gap: 5px; min-width: 0; }
+  #storyNames li i.dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+  #storyNames li .who { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #storyNames li .count { display: flex; align-items: center; gap: 2px; }
+  #storyNames li .sign { width: 14px; height: 14px; }
+  #storyNames li.helper { opacity: 0.7; }
+  #storyNames li.me { font-weight: 700; color: #ffe08a; }
 </style>
 </head>
 <body class="keys">
@@ -131,6 +153,17 @@
 <button id="lock" type="button" data-sign="lock"></button>
 <div id="keys" class="panel"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd><i class="sign" data-sign="move"></i><kbd>Space</kbd><i class="sign" data-sign="lock"></i></div>
 <div id="status" class="panel" data-sign="wait"></div>
+<div id="storyCount" class="panel" hidden><i class="sign" data-sign="body"></i><span id="storyShown">0</span></div>
+<div id="storyTools" hidden>
+  <button id="storySave" type="button" data-sign="save" hidden></button>
+  <button id="storyAgain" type="button" data-sign="again" hidden></button>
+  <button id="storyClose" type="button" data-sign="close"></button>
+</div>
+<div id="storyEnd" hidden>
+  <div id="storyHead"></div>
+  <ul id="storyNames"></ul>
+  <div id="storyRecords"></div>
+</div>
 <script type="module" src="/js/main.js"></script>
 </body>
 </html>

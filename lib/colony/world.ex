@@ -292,6 +292,21 @@ defmodule Colony.World do
     if is_map_key(world.players, id), do: free_player_id(world, rem(id, 0xFFFE) + 1), else: id
   end
 
+  @doc """
+  A player gets a new name. The bodies that the player locked before keep the old name.
+  """
+  def rename(%__MODULE__{} = world, id, name) do
+    case world.players do
+      %{^id => %{helper: nil} = player} ->
+        world
+        |> put_player(id, %{player | name: name})
+        |> event(:names, {id, name, false})
+
+      _ ->
+        world
+    end
+  end
+
   @doc "Removes a player. The locked bodies of the player stay."
   def leave(%__MODULE__{} = world, id) do
     %{world | players: Map.delete(world.players, id)}
@@ -808,18 +823,14 @@ defmodule Colony.World do
     if k < rivers(world), do: add_pile(world, k + 1), else: flag(world, :food)
   end
 
-  # At a crossing, the workers that waited go across the bridge. One of each `wait_part`
-  # goes to the new pile: 3 workers or more. These are the workers at the end of the line.
-  # The workers at its start are near the player who made the crossing: they stay spare
-  # bodies for the next bridge. After the last crossing, all of them go to the pile.
+  # At a crossing, the workers that waited go across the bridge. The worker at the end of
+  # the line goes to the new pile. The other workers go to the next crossing place: they
+  # stay spare bodies near the player who made the crossing. After the last crossing, all
+  # of them go to the pile. See also `Colony.Workers`: a new pile calls workers.
   defp send_to_pile(world, k) do
     way = Map.fetch!(world.to_pile, k)
     waiting = for {_id, %{mode: :wait}} = entry <- world.workers, do: entry
-
-    count =
-      if k == rivers(world),
-        do: length(waiting),
-        else: max(3, ceil(length(waiting) / world.p.wait_part))
+    count = if k == rivers(world), do: length(waiting), else: 1
 
     workers =
       waiting

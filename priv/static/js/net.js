@@ -73,6 +73,11 @@ export class Net {
     return this.ask("body", { cell });
   }
 
+  // This player has a new name.
+  rename(name) {
+    return this.ask("name", { name });
+  }
+
   // The players with their bodies and their food, for the story.
   story() {
     return this.ask("story", {});

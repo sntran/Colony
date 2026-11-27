@@ -31,6 +31,9 @@ defmodule Colony.Server do
   """
   def lock(id, cell, position), do: GenServer.call(__MODULE__, {:lock, id, cell, position})
 
+  @doc "A player gets a new name."
+  def rename(id, name), do: GenServer.cast(__MODULE__, {:rename, id, name})
+
   @doc "The data of a locked body: name, time, and the number of bodies that went on it. Or nil."
   def body(cell), do: GenServer.call(__MODULE__, {:body, cell})
 
@@ -169,6 +172,10 @@ defmodule Colony.Server do
   @impl true
   def handle_cast({:move, id, binary}, state) do
     {:noreply, %{state | world: apply_move(state.world, id, binary)}}
+  end
+
+  def handle_cast({:rename, id, name}, state) do
+    {:noreply, %{state | world: World.rename(state.world, id, name)}}
   end
 
   @impl true

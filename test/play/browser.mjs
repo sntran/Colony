@@ -19,9 +19,11 @@ export function launch() {
 }
 
 // Opens the game at phone size. `query` is added to the address, for example "&story=1".
-export async function open(browser, query = "", wait = true) {
+// `before` is a function that runs in the page before the code of the page.
+export async function open(browser, query = "", wait = true, before = null) {
   const context = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, hasTouch: true, isMobile: true, acceptDownloads: true });
   const page = await context.newPage();
+  if (before) await page.addInitScript(before);
   const errors = [];
   page.on("console", (message) => message.type() === "error" && errors.push(message.text()));
   page.on("pageerror", (error) => errors.push(error.message));
@@ -70,6 +72,14 @@ export async function open(browser, query = "", wait = true) {
     await touch.move(1, STICK.x + x * STICK.radius, STICK.y - y * STICK.radius);
   };
   const tapLock = () => touch.tap(2, LOCK.x, LOCK.y);
+  // A tap on the middle of an element of the page.
+  const tapOn = async (id) => {
+    const at = await page.evaluate((name) => {
+      const box = document.getElementById(name).getBoundingClientRect();
+      return [box.left + box.width / 2, box.top + box.height / 2];
+    }, id);
+    await touch.tap(3, at[0], at[1]);
+  };
 
   // The numbers of the game that a test reads.
   const state = () =>
@@ -79,20 +89,33 @@ export async function open(browser, query = "", wait = true) {
         x: world.me.x, z: world.me.z, carry: world.me.carry, name: world.me.name,
         spare: world.freeWorkers, food: world.foodNest, stage: world.stage, complete: world.complete,
         locks: player.locks, noLocks: player.noLocks, locked: world.locked.size, corrections: player.corrections,
+        // The land that the body is on, or -1 on a bridge.
+        land: ((cell) => (cell >= 0 && world.grid.kind(cell) === 0 ? world.grid.land(cell) : -1))(world.grid.cellAt(world.me.x, world.me.z)),
+        moment: window.colony.moment(),
+        sound: { ...window.colony.sound.counts, running: Boolean(window.colony.sound.context && window.colony.sound.context.state === "running") },
+        story: window.colony.story.state(),
         records: window.colony.records(), view: window.colony.view(), times: window.colony.times(),
         piles: [...world.piles.values()].map((pile) => ({ id: pile.id, units: pile.units, far: pile.far, cell: pile.cell })),
         cell: world.grid.cellAt(world.me.x, world.me.z),
       };
     });
 
+  // A screenshot with all the pixels. The time of the page stops for it: the picture is
+  // the picture of one moment.
   const shot = async (path) => {
-    await page.evaluate(() => (window.colony.renderer.scale = 2));
-    await page.waitForTimeout(600);
+    await page.evaluate(() => {
+      window.colony.freeze(true);
+      window.colony.renderer.scale = 2;
+    });
+    await page.waitForTimeout(500);
     await page.screenshot({ path, type: "jpeg", quality: 82 });
-    await page.evaluate(() => (window.colony.renderer.scale = 0.5));
+    await page.evaluate(() => {
+      window.colony.renderer.scale = 0.5;
+      window.colony.freeze(false);
+    });
   };
 
-  return { context, page, touch, stick, tapLock, state, shot, errors };
+  return { context, page, touch, stick, tapLock, tapOn, state, shot, errors };
 }
 
 // Plays with the script of the new player until `done(state, seconds)` is true or the

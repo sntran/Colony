@@ -1,23 +1,31 @@
-// The page: it connects the server, the input and the picture.
+// The page: it connects the server, the input, the picture and the sound.
 
+import { ROW_STEP } from "./hex.js";
 import { Net } from "./net.js";
 import { World, MESH_STRIDE } from "./state.js";
-import { Renderer } from "./render.js";
+import { Renderer, PILE_LIGHT_DELAY } from "./render.js";
 import { Input } from "./input.js";
 import { Guide } from "./guide.js";
 import { Player } from "./player.js";
+import { Sound } from "./sound.js";
+import { Story } from "./story.js";
+import { Effects } from "./fx.js";
 import { PLAYER_CAMERA } from "./view.js";
-import { myName, colorOf, cssColor, HELPER_COLOR } from "./names.js";
+import { myName, newName, colorOf, cssColor, HELPER_COLOR } from "./names.js";
 import { SIGNS, putSigns, sign } from "./signs.js";
 
 const params = new URLSearchParams(location.search);
-// A page that only looks has no body in the world.
-const look = params.get("demo") === "1" || params.get("story") === "1";
+// "?story=1" shows the story with no body in the world. "?demo=1" shows the story one
+// time, then the live world with a slow camera. These pages only look.
+const storyPage = params.get("story") === "1";
+const demoPage = params.get("demo") === "1";
+const look = storyPage || demoPage;
 const showStats = params.get("stats") === "1";
 // "?scale=1" sets the number of canvas pixels for each page pixel and stops the automatic change.
 const fixedScale = parseFloat(params.get("scale")) || 0;
 
 const $ = (id) => document.getElementById(id);
+const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
 const canvas = $("view");
 const world = new World();
 const me = world.me;
@@ -25,14 +33,11 @@ me.name = myName();
 me.color = colorOf(me.name);
 putSigns(document);
 
-let renderer;
-try {
-  renderer = new Renderer(canvas);
-} catch (error) {
-  // This browser cannot draw the game. The sign of the wait stays.
-  throw error;
-}
+// If this browser cannot draw the game, the sign of the wait stays.
+const renderer = new Renderer(canvas);
 if (fixedScale) renderer.scale = fixedScale;
+const fx = new Effects(renderer);
+const sound = new Sound();
 
 // The touch controls show on a device with a touch screen. The key help shows on the others.
 const setTouch = () => {
@@ -43,8 +48,14 @@ if (matchMedia("(pointer: coarse)").matches) setTouch();
 window.addEventListener("touchstart", setTouch, { once: true, passive: true });
 if (look) document.body.classList.add("look");
 
-$("name").textContent = me.name;
-$("swatch").style.background = cssColor(me.color);
+// The sound starts at the first touch or at the first key.
+for (const event of ["pointerdown", "keydown"]) window.addEventListener(event, () => sound.start(), { capture: true, passive: true });
+
+function showName() {
+  $("name").textContent = me.name;
+  $("swatch").style.background = cssColor(me.color);
+}
+showName();
 
 // ---------------------------------------------------------------------------
 // Messages from the server
@@ -55,6 +66,7 @@ let records = [];
 // The time of the load of the page, and the time of the first food at the nest. A test reads them.
 const loadTime = performance.now();
 let firstFood = null;
+let wasComplete = null;
 
 const guide = new Guide(world);
 let player;
@@ -68,16 +80,16 @@ const net = new Net(me.name, look, {
     }
     world.scentDirty = true;
     world.foodDirty = true;
-    solidKey = -1;
+    solidKey = "";
     const mine = world.players.get(world.you);
     me.alive = Boolean(mine);
     if (mine) {
       player.place(mine.tx, mine.tz);
       me.heading = 0;
-      me.slideX = me.slideZ = 0;
       camera.x = me.x;
       camera.z = me.z + PLAYER_CAMERA.ahead;
     }
+    if (wasComplete === null) wasComplete = world.complete;
     $("status").hidden = true;
     $("top").hidden = false;
   },
@@ -93,8 +105,8 @@ const net = new Net(me.name, look, {
   },
   record(record) {
     records = [record, ...records.filter((other) => other.id !== record.id)].sort((a, b) => b.id - a.id);
-    // At a crossing, each player sees the record.
-    if (record.first) showCard(record);
+    if (record.first) crossing(record);
+    else if (story.phase === "end") showStory();
   },
   status(text) {
     $("status").hidden = text === "" && world.ready;
@@ -116,6 +128,20 @@ function count(name, value) {
   return element;
 }
 
+function nameItem(entry) {
+  const item = document.createElement("li");
+  if (entry.helper) item.className = "helper";
+  else if (entry.name === me.name) item.className = "me";
+  const dot = document.createElement("i");
+  dot.className = "dot";
+  dot.style.background = cssColor(entry.helper ? HELPER_COLOR : colorOf(entry.name));
+  const who = document.createElement("span");
+  who.className = "who";
+  who.textContent = entry.name;
+  item.append(dot, who, count("body", entry.bodies), count("food", entry.food));
+  return item;
+}
+
 function recordElement(record) {
   const element = document.createElement("div");
   element.className = "record";
@@ -130,6 +156,7 @@ function recordElement(record) {
   bodies.append(`${record.bodies}`, sign("body"));
   const time = document.createElement("span");
   time.append(`${record.seconds}`, sign("clock"));
+  // The food that was left in the pile at the crossing, of the food at its start.
   const left = document.createElement("span");
   left.className = "left";
   const size = document.createElement("small");
@@ -138,29 +165,66 @@ function recordElement(record) {
   head.append(river, bodies, time, left);
 
   const names = document.createElement("ul");
-  for (const entry of record.names) {
-    const item = document.createElement("li");
-    if (entry.helper) item.className = "helper";
-    else if (entry.name === me.name) item.className = "me";
-    const dot = document.createElement("i");
-    dot.className = "dot";
-    dot.style.background = cssColor(entry.helper ? HELPER_COLOR : colorOf(entry.name));
-    const who = document.createElement("span");
-    who.className = "who";
-    who.textContent = entry.name;
-    item.append(dot, who, count("body", entry.bodies), count("food", entry.food));
-    names.appendChild(item);
-  }
+  for (const entry of record.names) names.appendChild(nameItem(entry));
   element.append(head, names);
   return element;
 }
 
 let cardTimer = null;
 function showCard(record) {
+  if (story.running) return;
   $("card").replaceChildren(recordElement(record));
   $("card").hidden = false;
   clearTimeout(cardTimer);
   cardTimer = setTimeout(() => ($("card").hidden = true), 6000);
+}
+
+// ---------------------------------------------------------------------------
+// The moment of a crossing
+
+// While the camera shows the full bridge: { record, start, x, z, scale, stick }.
+let showing = null;
+// The number of crossings that this page showed. A test reads it.
+let crossingsShown = 0;
+
+function crossing(record) {
+  crossingsShown++;
+  const bodies = [...world.locked.values()].filter((body) => body.river === record.id).sort((a, b) => a.n - b.n);
+  // The song of the bridge: its notes again, fast, in the order of the locks. Then a chord.
+  const center = bodies.length > 0 ? bodies[Math.floor(bodies.length / 2)] : null;
+  const far = center ? Math.hypot(center.x - camera.x, center.z - camera.z) : 0;
+  sound.song(record.id, bodies.map((body) => body.row), clamp(1.2 - far / 60, 0.35, 1));
+
+  const mine = record.names.some((entry) => entry.name === me.name && !entry.helper);
+  if (look || story.running || bodies.length === 0 || (!mine && far > 40)) {
+    showCard(record);
+    return;
+  }
+  // The camera moves back and shows the full bridge for 2.5 seconds.
+  let [x0, x1, z0, z1] = [Infinity, -Infinity, Infinity, -Infinity];
+  for (const body of bodies) {
+    x0 = Math.min(x0, body.x);
+    x1 = Math.max(x1, body.x);
+    z0 = Math.min(z0, body.z);
+    z1 = Math.max(z1, body.z);
+  }
+  const aspect = canvas.clientWidth / canvas.clientHeight;
+  const scale = clamp(Math.max((z1 - z0 + 7) / 11, (x1 - x0 + 5) / (9 * aspect)), 1.15, 3);
+  showing = { record, start: performance.now(), x: (x0 + x1) / 2, z: (z0 + z1) / 2 + 0.5, scale, stick: [input.x, input.y] };
+}
+
+function moveCrossing(now) {
+  if (!showing) return;
+  const time = now - showing.start;
+  // A move of the stick stops this. The first moment does not count: the thumb is on
+  // the stick at the lock.
+  const moved = Math.hypot(input.x - showing.stick[0], input.y - showing.stick[1]) > 0.35;
+  if (time < 300) showing.stick = [input.x, input.y];
+  if (time > 2500 || (time >= 300 && moved)) {
+    // The record card shows. Then the light of the next pile appears.
+    showCard(showing.record);
+    showing = null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -174,7 +238,7 @@ const input = new Input(
   { zone: $("zone"), stick: $("stick"), knob: $("knob"), lock: $("lock"), canvas },
   {
     lock() {
-      if (look) return;
+      if (look || story.running) return;
       const button = $("lock");
       button.classList.add("tap");
       setTimeout(() => button.classList.remove("tap"), 90);
@@ -185,7 +249,7 @@ const input = new Input(
     },
     tap(x, y) {
       // Show the name, the time and the count of a locked body.
-      if (!world.ready) return;
+      if (!world.ready || story.running) return;
       const point = renderer.pick(x, y, 0.08);
       const cell = point ? world.grid.cellAt(point[0], point[1]) : -1;
       selected = cell >= 0 && world.locked.has(cell) ? cell : -1;
@@ -200,18 +264,123 @@ const input = new Input(
   }
 );
 
-// The colony has no spare body: the button shakes and the number at the top flashes.
-function noSpare() {
-  const button = $("lock");
-  button.classList.remove("no");
-  void button.offsetWidth;
-  button.classList.add("no");
+function again(element, name) {
+  element.classList.remove(name);
+  void element.offsetWidth;
+  element.classList.add(name);
 }
 
-// This player locked: the picture of the body goes to the new body.
+// The colony has no spare body: a low sound, the button shakes, and the number at the
+// top flashes.
+function noSpare() {
+  sound.none();
+  again($("lock"), "no");
+}
+
+// The locks of this player that had their note. The news of such a lock makes no
+// second note.
+const mine = new Set();
+// The light that flies from the locked body of this player to the new body.
+let flight = null;
+
+function vibrate() {
+  try {
+    if (navigator.vibrate) navigator.vibrate(15);
+  } catch (_) {
+    // This browser does not shake the phone.
+  }
+}
+
+// The moment of a lock of this player. In this order, in less than half a second: the
+// body goes down into the cell, a note plays and the phone shakes, a point of light
+// flies to the new body and the camera follows it, and the name shows.
 function locked(result) {
-  me.slideX = result.from[0] - result.to[0];
-  me.slideZ = result.from[1] - result.to[1];
+  const grid = world.grid;
+  if (!mine.delete(`heard:${result.cell}`)) {
+    sound.lock(grid.river(result.cell), grid.riverRow(result.cell), 1);
+    mine.add(result.cell);
+  }
+  vibrate();
+  me.slideX = me.slideZ = 0;
+  me.arrive = world.time + 0.4;
+  flight = fx.light([grid.x(result.cell), grid.z(result.cell)], result.to, me.color, world.time, 0.4);
+}
+
+// A tap on my name gives a new random name. The name stays on this device.
+$("me").addEventListener("pointerup", () => {
+  if (look) return;
+  me.name = newName();
+  me.color = colorOf(me.name);
+  showName();
+  net.rename(me.name);
+});
+
+function showSound() {
+  $("soundButton").innerHTML = sound.on ? SIGNS.soundOn : SIGNS.soundOff;
+}
+showSound();
+$("soundButton").addEventListener("pointerup", () => {
+  sound.start();
+  sound.toggle();
+  showSound();
+});
+
+// ---------------------------------------------------------------------------
+// What the last messages brought: locks, new workers and food
+
+// The names of the bodies that locked a moment before: { cell, name, helper, until }.
+let lockNames = [];
+let stepAt = 0;
+
+function takeNews(now) {
+  const news = world.takeNews();
+  if (!world.ready) return;
+  const grid = world.grid;
+  for (const lock of news.locks) {
+    const x = grid.x(lock.cell);
+    const z = grid.z(lock.cell);
+    // A ring goes out on the water when the body is down.
+    fx.ripple(x, z, world.time + 0.13);
+    // The name label of the locked body shows for 2 seconds.
+    lockNames.push({ cell: lock.cell, name: lock.name, helper: lock.helper, until: now + 2000 });
+    if (lockNames.length > 8) lockNames.shift();
+    if (mine.delete(lock.cell)) continue;
+    const near = lock.id === world.you ? 1 : clamp(1 - Math.hypot(x - camera.x, z - camera.z) / 34, 0.1, 0.75);
+    sound.lock(grid.river(lock.cell), grid.riverRow(lock.cell), near);
+    if (lock.id === world.you) {
+      // The message of the lock came before its reply.
+      mine.add(`heard:${lock.cell}`);
+    } else {
+      // The light of an other player flies to the new body of that player.
+      const other = world.players.get(lock.id);
+      if (other && renderer.sees(x, z)) fx.light([x, z], [other.tx, other.tz], other.color, world.time, 0.4);
+    }
+  }
+  const nest = [grid.x(world.nest), grid.z(world.nest)];
+  const near = clamp(1 - Math.hypot(nest[0] - camera.x, nest[1] - camera.z) / 22, 0, 1);
+  for (let i = 0; i < Math.min(2, news.food); i++) sound.food(near);
+  if (news.workers > 0) sound.worker(near);
+
+  // The steps of this body: very soft ticks.
+  if (player.walked - stepAt > 0.62) {
+    stepAt = player.walked;
+    sound.step();
+  }
+  // Water: louder near a river.
+  let distance = Infinity;
+  const z = look ? camera.z : me.z;
+  for (const river of grid.rivers) {
+    const south = river.start * ROW_STEP - 0.5;
+    const north = (river.start + Math.max(...river.widths)) * ROW_STEP;
+    distance = Math.min(distance, Math.max(0, south - z, z - north));
+  }
+  sound.setWater(clamp(1 - distance / 7, 0.08, 1));
+
+  // When the world gets complete, each page shows the story one time.
+  if (world.complete && wasComplete === false) {
+    wasComplete = true;
+    setTimeout(() => story.open(), 5000);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -230,11 +399,12 @@ function markCells(time, now) {
   let ringCount = 0;
   let cellCount = 0;
   let openCount = 0;
+  const marks = !story.running;
 
   // Each open cell on the screen has a bright edge that moves slowly, all the time.
   if (world.open.size * MESH_STRIDE > openMarks.length) openMarks = new Float32Array(world.open.size * MESH_STRIDE * 2);
   const spare = world.freeWorkers > 0;
-  for (const cell of world.open) {
+  for (const cell of marks ? world.open : []) {
     const x = grid.x(cell);
     const z = grid.z(cell);
     if (!renderer.sees(x, z)) continue;
@@ -242,9 +412,9 @@ function markCells(time, now) {
     put(openMarks, openCount++, x, 0.03, z, 0, 1, [1, 0.86, 0.35], spare ? 0.95 : 0.35);
   }
 
-  if (me.alive) {
+  if (me.alive && marks) {
     // A ring on the ground shows the body of this player between the workers.
-    put(rings, ringCount++, me.x + me.slideX, me.y + 0.04, me.z + me.slideZ, time * 0.8, 0.82, [1, 1, 1], 0.55);
+    if (time >= me.arrive) put(rings, ringCount++, me.x, me.y + 0.04, me.z, time * 0.8, 0.82, [1, 1, 1], 0.55);
     const target = player.target;
     if (target >= 0 && spare) {
       const pulse = 0.5 + 0.5 * Math.sin(time * 6);
@@ -256,44 +426,85 @@ function markCells(time, now) {
   renderer.fill("open", openMarks, openCount);
   renderer.fill("rings", rings, ringCount);
   renderer.fill("cells", cells, cellCount);
-  $("lock").classList.toggle("ready", player.ready(now));
+  $("lock").classList.toggle("ready", marks && player.ready(now));
 }
 
 // ---------------------------------------------------------------------------
 // The camera
 
 const camera = { x: 30, z: 5, ...PLAYER_CAMERA };
+// The camera looks a little in the direction of the move.
+const lead = [0, 0];
 
 function moveCamera(dt, time) {
   const grid = world.grid;
+  let [height, distance, turn, fov] = [PLAYER_CAMERA.height, PLAYER_CAMERA.distance, 0, PLAYER_CAMERA.fov];
+  let rate = 6;
+  let x = camera.x;
+  let z = camera.z;
+  camera.far = 140;
+
+  if (story.running) {
+    story.update(dt, camera);
+    renderer.setCamera(camera);
+    return;
+  }
   if (look) {
     // A slow camera goes along the world, from the nest to the north and back.
     const north = world.stage <= grid.rivers.length ? grid.rivers[world.stage - 1].start + 8 : grid.rows - 4;
     const part = 0.5 - 0.5 * Math.cos(time * 0.05);
-    const follow = 1 - Math.exp(-dt * 0.6);
-    camera.x += (grid.x(world.nest) + Math.sin(time * 0.07) * 6 - camera.x) * follow;
-    camera.z += (4 + part * (north * 0.866 - 4) - camera.z) * follow;
-    camera.turn = 0.25 * Math.sin(time * 0.09);
-    const far = canvas.clientWidth < canvas.clientHeight ? 1.5 : 1;
-    camera.height = 8.2 * far;
-    camera.distance = 9 * far;
+    x = grid.x(world.nest) + Math.sin(time * 0.07) * 6;
+    z = 4 + part * (north * ROW_STEP - 4);
+    turn = 0.25 * Math.sin(time * 0.09);
+    const tall = canvas.clientWidth < canvas.clientHeight ? 1.5 : 1;
+    height = 8.2 * tall;
+    distance = 9 * tall;
+    rate = 0.6;
+  } else if (showing) {
+    // The camera moves back and shows the full bridge.
+    x = showing.x;
+    z = showing.z;
+    height *= showing.scale;
+    distance *= showing.scale;
+    rate = 3.2;
   } else {
     // The camera follows the body softly.
-    const follow = 1 - Math.exp(-dt * 6);
-    camera.x += (me.x - camera.x) * follow;
-    camera.z += (me.z + PLAYER_CAMERA.ahead - camera.z) * follow;
+    const moving = Math.hypot(input.x, input.y) > 0.1;
+    const ease = 1 - Math.exp(-dt * 1.6);
+    lead[0] += ((moving ? -input.x * 1.3 : 0) - lead[0]) * ease;
+    lead[1] += ((moving ? input.y * 1.3 : 0) - lead[1]) * ease;
+    x = me.x + lead[0];
+    z = me.z + PLAYER_CAMERA.ahead + lead[1];
+    // After a lock, the camera follows the light to the new body. Thus the player
+    // always knows where the new body is.
+    const at = flight ? fx.lightAt(flight, time) : null;
+    if (at) {
+      x = at[0];
+      z = at[2] + PLAYER_CAMERA.ahead;
+      rate = 14;
+    } else {
+      flight = null;
+    }
   }
+  const follow = 1 - Math.exp(-dt * rate);
+  const slow = 1 - Math.exp(-dt * Math.min(rate, 3.5));
+  camera.x += (x - camera.x) * follow;
+  camera.z += (z - camera.z) * follow;
+  camera.height += (height - camera.height) * slow;
+  camera.distance += (distance - camera.distance) * slow;
+  camera.turn += (turn - camera.turn) * slow;
+  camera.fov += (fov - camera.fov) * slow;
   renderer.setCamera(camera);
 }
 
 // ---------------------------------------------------------------------------
 // The arrow at the edge of the screen
 
-// What the arrow shows now: { goal, x, y, angle } on the page, or null. A test reads it.
+// What the arrow shows now: { goal, x, y, dx, dy } on the page, or null. A test reads it.
 let arrow = null;
 
 function moveArrow() {
-  arrow = guide.arrow(me, (x, y, z) => renderer.project(x, y, z), canvas.clientWidth, canvas.clientHeight);
+  arrow = showing || story.running ? null : guide.arrow(me, (x, y, z) => renderer.project(x, y, z), canvas.clientWidth, canvas.clientHeight);
   const element = $("arrow");
   element.hidden = !arrow;
   if (arrow) {
@@ -311,62 +522,71 @@ function moveArrow() {
 // ---------------------------------------------------------------------------
 // Names and numbers above the picture
 
+// One label for each key. A label that is not used in a frame goes away.
 const labels = new Map();
-const pileLabels = new Map();
+let labelFrame = 0;
 
-function drawLabels() {
-  for (const [id, other] of world.players) {
-    if (id === world.you) continue;
-    let label = labels.get(id);
-    if (!label) {
-      label = document.createElement("div");
-      $("labels").appendChild(label);
-      labels.set(id, label);
-    }
-    const at = renderer.project(other.x, other.y + 0.55, other.z);
-    label.hidden = !at;
-    if (at) {
-      label.textContent = other.name;
-      label.className = other.helper ? "helper" : "";
-      label.style.left = `${at[0]}px`;
-      label.style.top = `${at[1]}px`;
-    }
+function label(key, kind, x, y, z) {
+  const at = renderer.project(x, y, z);
+  if (!at) return null;
+  let element = labels.get(key);
+  if (!element) {
+    element = document.createElement("div");
+    $("labels").appendChild(element);
+    labels.set(key, element);
   }
-  for (const [id, label] of labels) {
-    if (!world.players.has(id) || id === world.you) {
-      label.remove();
-      labels.delete(id);
-    }
+  if (element.className !== kind) element.className = kind;
+  element.style.left = `${at[0]}px`;
+  element.style.top = `${at[1]}px`;
+  element.frame = labelFrame;
+  return element;
+}
+
+function text(element, value) {
+  if (element && element.textContent !== value) element.textContent = value;
+}
+
+function drawLabels(now) {
+  labelFrame++;
+  const grid = world.grid;
+  const free = !world.hideFree;
+  for (const [id, other] of free ? world.players : []) {
+    if (id === world.you) continue;
+    text(label(`p${id}`, other.helper ? "helper" : "", other.x, other.y + 0.55, other.z), other.name);
   }
 
   // The number of units of each pile, above the pile. The number is red while the pile
   // loses units.
   for (const pile of world.piles.values()) {
-    let label = pileLabels.get(pile.id);
-    if (!label) {
-      label = document.createElement("div");
-      label.append(sign("food"), document.createElement("span"));
-      $("labels").appendChild(label);
-      pileLabels.set(pile.id, label);
-    }
-    const at = pile.units > 0 ? renderer.project(world.grid.x(pile.cell), 1.6, world.grid.z(pile.cell)) : null;
-    label.hidden = !at;
-    if (at) {
-      label.className = pile.far && world.time - pile.changed < 2.5 ? "pile loss" : "pile";
-      label.lastChild.textContent = `${pile.units}`;
-      label.style.left = `${at[0]}px`;
-      label.style.top = `${at[1]}px`;
-    }
+    if (pile.units === 0 || world.time - pile.born < PILE_LIGHT_DELAY) continue;
+    const loss = pile.far && world.time - pile.changed < 2.5;
+    const element = label(`f${pile.id}`, loss ? "pile loss" : "pile", grid.x(pile.cell), 1.6, grid.z(pile.cell));
+    if (!element) continue;
+    if (!element.firstChild) element.append(sign("food"), document.createElement("span"));
+    text(element.lastChild, `${pile.units}`);
   }
-  for (const [id, label] of pileLabels) {
-    if (!world.piles.has(id)) {
-      label.remove();
-      pileLabels.delete(id);
+
+  // The name of a body that locked a moment before, for 2 seconds.
+  lockNames = lockNames.filter((entry) => entry.until > now);
+  for (const entry of story.running ? [] : lockNames) {
+    const element = label(`l${entry.cell}`, entry.helper ? "locked helper" : "locked", grid.x(entry.cell), 0.5, grid.z(entry.cell));
+    text(element, entry.name);
+    if (element) element.style.opacity = clamp((entry.until - now) / 400, 0, 1);
+  }
+  // The story: the first body of each player shows the name.
+  story.labels.forEach((entry, index) => {
+    text(label(`s${index}:${entry.name}`, entry.helper ? "locked helper" : "locked", entry.x, 0.5, entry.z), entry.name);
+  });
+
+  for (const [key, element] of labels) {
+    if (element.frame !== labelFrame) {
+      element.remove();
+      labels.delete(key);
     }
   }
 
-  // A mark above the body of this player.
-  const mark = me.alive ? renderer.project(me.x + me.slideX, me.y + 0.62, me.z + me.slideZ) : null;
+  // A mark above the body of this player. It is not there while the light flies.
+  const mark = me.alive && free && world.time >= me.arrive ? renderer.project(me.x, me.y + 0.62, me.z) : null;
   $("you").hidden = !mark;
   if (mark) {
     $("you").style.left = `${mark[0]}px`;
@@ -376,7 +596,7 @@ function drawLabels() {
   // The name, the time and the count of the locked body that the player tapped.
   const info = $("info");
   const body = selected >= 0 ? world.locked.get(selected) : null;
-  const at = body && performance.now() - selectedTime < 6000 ? renderer.project(body.x, 0.3, body.z) : null;
+  const at = body && now - selectedTime < 6000 ? renderer.project(body.x, 0.3, body.z) : null;
   info.hidden = !at;
   if (at) {
     if (info.dataset.cell !== `${selected}:${selectedData ? 1 : 0}`) {
@@ -402,12 +622,6 @@ function drawLabels() {
 let shownSpare = -1;
 let shownFood = -1;
 
-function again(element, name) {
-  element.classList.remove(name);
-  void element.offsetWidth;
-  element.classList.add(name);
-}
-
 function drawCounts() {
   const spare = world.freeWorkers;
   if (spare !== shownSpare) {
@@ -425,6 +639,71 @@ function drawCounts() {
     $("foodCount").textContent = `${world.foodNest}`;
   }
 }
+
+// ---------------------------------------------------------------------------
+// The story
+
+const story = new Story({ world, renderer, sound, net, canvas });
+story.wave = (body) => fx.ripple(body.x, body.z, world.time + 0.13);
+story.onChange = showStory;
+let storyTimer = null;
+
+function showStory() {
+  const end = story.phase === "end";
+  document.body.classList.toggle("story", story.running);
+  $("storyTools").hidden = !story.running;
+  $("storyCount").hidden = story.phase !== "play";
+  $("storyEnd").hidden = !end;
+  $("storySave").hidden = !end;
+  $("storyAgain").hidden = !end;
+  if (story.running) $("card").hidden = true;
+  if (!end) return;
+
+  // The world from above: the number of crossings, of bodies and of food, the date, the
+  // names with their bodies and their food, and the records of the bridges.
+  const head = $("storyHead");
+  head.replaceChildren();
+  const part = (name, value) => {
+    const element = document.createElement("span");
+    element.append(sign(name), value);
+    head.append(element);
+  };
+  part("river", `${world.stage - 1} / ${world.grid.rivers.length}`);
+  part("body", `${world.locked.size}`);
+  part("food", `${world.foodNest}`);
+  const date = document.createElement("span");
+  date.className = "date";
+  date.textContent = new Date(world.startTime * 1000).toLocaleDateString();
+  head.append(date);
+  $("storyNames").replaceChildren(...story.names.map(nameItem));
+  $("storyNames").classList.toggle("few", story.names.length <= 3);
+  $("storyRecords").replaceChildren(...[...records].sort((a, b) => a.id - b.id).map(recordElement));
+
+  // The demo mode shows the story one time, then the live world with a slow camera.
+  clearTimeout(storyTimer);
+  if (demoPage) storyTimer = setTimeout(() => story.close(), 9000);
+}
+
+// Draws the world from above with many pixels, for the picture.
+function drawPicture() {
+  const scale = renderer.scale;
+  renderer.scale = Math.max(scale, 2);
+  renderer.resize();
+  renderer.setCamera({ ...story.above(), far: 600 });
+  buildPicture(world.time);
+  renderer.draw(world, world.time);
+  renderer.scale = scale;
+}
+
+// Not "click": a tap of the right thumb is not a click while the left thumb is on the stick.
+$("storyButton").addEventListener("pointerup", () => story.open());
+// The first tap goes to the end of the story. The second tap closes it.
+$("storyClose").addEventListener("pointerup", () => (story.phase === "play" ? story.skip() : story.close()));
+$("storyAgain").addEventListener("pointerup", () => {
+  story.close();
+  story.open();
+});
+$("storySave").addEventListener("pointerup", () => story.save(drawPicture));
 
 // ---------------------------------------------------------------------------
 // Statistics, and the number of pixels
@@ -466,12 +745,25 @@ function watchSpeed(dt) {
 // ---------------------------------------------------------------------------
 // Each frame
 
-let solidKey = -1;
+// Makes the lists of the bodies and gives them to the picture.
+function buildPicture(time) {
+  world.build((x, z) => renderer.sees(x, z));
+  renderer.fill("bodies", world.bodies, world.bodyCount);
+  renderer.fill("shadows", world.shadows, world.shadowCount);
+  renderer.fill("crumbs", world.crumbs, world.crumbCount);
+  renderer.fill("decks", world.decks, world.deckCount);
+  fx.update(time);
+}
+
+let solidKey = "";
+let opened = false;
+// A test stops the time of the page for a screenshot of one moment.
+let frozen = false;
 let last = performance.now();
 function frame(now) {
   requestAnimationFrame(frame);
   // A slow frame does not make the game slow: the time of the frame is the real time.
-  const dt = Math.min(0.25, (now - last) / 1000);
+  const dt = frozen ? 0 : Math.min(0.25, (now - last) / 1000);
   last = now;
   frames++;
   watchSpeed(dt);
@@ -481,18 +773,19 @@ function frame(now) {
   if (world.ready) {
     const time = world.time;
     if (!look) {
-      player.step(dt, input.x, input.y);
+      // While the story plays, the body does not move.
+      const play = !story.running;
+      player.step(dt, play ? input.x : 0, play ? input.y : 0);
       player.send(now);
     }
     world.update(dt);
-    world.takeNews();
+    takeNews(now);
+    moveCrossing(now);
     markCells(time, now);
     moveCamera(dt, time);
-    world.build((x, z) => renderer.sees(x, z));
-    renderer.fill("bodies", world.bodies, world.bodyCount);
-    renderer.fill("shadows", world.shadows, world.shadowCount);
-    renderer.fill("crumbs", world.crumbs, world.crumbCount);
-    renderer.fill("decks", world.decks, world.deckCount);
+    buildPicture(time);
+    // The light of a new pile grows for some seconds.
+    for (const pile of world.piles.values()) if (time - pile.born < PILE_LIGHT_DELAY + 2) world.foodDirty = true;
     if (world.scentDirty) {
       renderer.setScent(world);
       world.scentDirty = false;
@@ -501,14 +794,20 @@ function frame(now) {
       renderer.setFood(world);
       world.foodDirty = false;
     }
-    if (solidKey !== world.structure) {
+    if (solidKey !== `${world.structure}:${world.storyLimit}`) {
       renderer.setSolid(world);
-      solidKey = world.structure;
+      solidKey = `${world.structure}:${world.storyLimit}`;
     }
     renderer.draw(world, time);
     moveArrow();
-    drawLabels();
+    drawLabels(now);
     drawCounts();
+    if (story.phase === "play") text($("storyShown"), `${story.shown} / ${story.locks.length}`);
+    // The pages that only look start with the story.
+    if (look && !opened) {
+      opened = true;
+      story.open();
+    }
   } else {
     renderer.draw(world, 0);
   }
@@ -524,9 +823,25 @@ window.colony = {
   guide,
   player,
   input,
+  sound,
+  story,
+  fx,
   records: () => records,
   arrow: () => arrow,
   times: () => ({ load: loadTime, firstFood }),
+  freeze: (on) => (frozen = on),
+  // The moments that the page shows now.
+  moment: () => ({ flight: flight !== null, showing: showing !== null, crossings: crossingsShown, card: !$("card").hidden, lockNames: lockNames.length, ripples: fx.ripples.length }),
+  // The picture of the story as a data address, for a test.
+  async picture() {
+    const blob = await story.picture(drawPicture);
+    const data = await new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.readAsDataURL(blob);
+    });
+    return { data, names: story.pictureNames, date: story.pictureDate };
+  },
   // What a person sees: the button, the body, the open cells on the screen and the arrow.
   view() {
     if (!world.ready) return { lock: false, me: null, open: [], arrow: null };

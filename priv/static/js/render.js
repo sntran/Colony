@@ -9,6 +9,9 @@ import { viewOf, project } from "./view.js";
 import * as shapes from "./geometry.js";
 
 const SUN = [0.42, 0.8, -0.43];
+// The light of a new pile appears this many seconds after the page sees the pile: after
+// the camera showed the bridge of the crossing.
+export const PILE_LIGHT_DELAY = 3.4;
 
 // The color of the fog and of the light in each season: spring, summer, autumn, winter.
 const AIR = [
@@ -318,7 +321,7 @@ export class Renderer {
       blob: this.upload(shapes.blobMesh()),
       disc: this.upload(shapes.discMesh()),
       ring: this.upload(shapes.ringMesh()),
-      thin: this.upload(shapes.ringMesh(0.9, 1.0)),
+      circle: this.upload(shapes.circleMesh(0.88, 1.0)),
       cell: this.upload(shapes.cellMesh()),
       beam: this.upload(shapes.beamMesh()),
     };
@@ -328,7 +331,7 @@ export class Renderer {
     this.list("bodies", this.meshes.body, BODY_STRIDE);
     for (const [name, mesh] of [
       ["shadows", "disc"], ["crumbs", "blob"], ["rings", "ring"], ["cells", "cell"], ["open", "ring"],
-      ["food", "blob"], ["beam", "beam"], ["holes", "disc"], ["decks", "cell"], ["ripples", "thin"],
+      ["food", "blob"], ["beam", "beam"], ["holes", "disc"], ["decks", "cell"], ["ripples", "circle"],
       ["lights", "blob"],
     ]) {
       this.list(name, this.meshes[mesh], MESH_STRIDE);
@@ -478,7 +481,8 @@ export class Renderer {
     const grid = world.grid;
     const solid = this.solid;
     for (let cell = 0; cell < grid.count; cell++) solid[cell] = grid.kind(cell) === GAP ? 0 : 255;
-    for (const cell of world.locked.keys()) solid[cell] = 128;
+    // The story shows only a part of the locked bodies.
+    for (const [cell, body] of world.locked) if (body.n <= world.storyLimit) solid[cell] = 128;
     gl.bindTexture(gl.TEXTURE_2D, this.solidTexture);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, grid.width, grid.rows, gl.RED, gl.UNSIGNED_BYTE, solid);
@@ -622,7 +626,9 @@ export class Renderer {
       const z = grid.z(pile.cell);
       add(this.pilePieces, Math.min(this.pilePieces.length, Math.ceil(pile.units / 6)), x, z, 0.21);
       // The light of a pile. The pile that no body can walk to has the tallest light.
-      if (pile.units > 0) beams.push(x, 0.2, z, 0.6, 0.36, pile.far ? 11 : 5, 0.36, 1.0, 0.82, 0.4, pile.far ? 0.4 : 0.2);
+      // The light of a new pile appears some seconds after the crossing, and it grows.
+      const shown = Math.max(0, Math.min(1, (world.time - pile.born - PILE_LIGHT_DELAY) / 1.4));
+      if (pile.units > 0 && shown > 0) beams.push(x, 0.2, z, 0.6, 0.36, (pile.far ? 11 : 5) * shown, 0.36, 1.0, 0.82, 0.4, (pile.far ? 0.4 : 0.2) * shown);
       holes.push(x, 0.02, z, 0, 1.25, 1, 1.25, 0, 0, 0, 0.22);
     }
     add(this.nestPieces, Math.min(this.nestPieces.length, Math.ceil(world.foodNest / 4)), this.nest[0] - 1.15, this.nest[1] + 0.25, 0.11);

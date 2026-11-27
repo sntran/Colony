@@ -73,12 +73,18 @@ defmodule Colony.Workers do
         if busy >= @called do
           world
         else
-          world.workers
-          |> Enum.filter(fn {_id, worker} ->
-            worker.carry == nil and not match?({:fetch, _}, worker.mode) and
-              is_map_key(way, worker.cell)
-          end)
-          |> Enum.sort_by(fn {id, worker} -> {Map.fetch!(way, worker.cell), id} end)
+          # A worker that waits at the crossing place is called only if no other worker
+          # is there: the workers that wait are the spare bodies of the builders.
+          free =
+            Enum.filter(world.workers, fn {_id, worker} ->
+              worker.carry == nil and worker.mode in [:idle, :food, :wait] and
+                is_map_key(way, worker.cell)
+            end)
+
+          {waiting, others} = Enum.split_with(free, fn {_id, worker} -> worker.mode == :wait end)
+          nearest = &Enum.sort_by(&1, fn {id, worker} -> {Map.fetch!(way, worker.cell), id} end)
+
+          (nearest.(others) ++ nearest.(waiting))
           |> Enum.take(@called - busy)
           |> Enum.reduce(world, fn {id, worker}, world ->
             put(world, id, %{worker | mode: {:fetch, k}})

@@ -66,6 +66,8 @@ export class World {
       z: new Float32Array(MAX_WORKERS),
       heading: new Float32Array(MAX_WORKERS),
       phase: new Float32Array(MAX_WORKERS),
+      // The time that the worker did not move.
+      still: new Float32Array(MAX_WORKERS),
     };
     this.workerEnd = 0;
     this.freeWorkers = 0;
@@ -96,11 +98,17 @@ export class World {
     // Things that occurred in the last messages. The page makes sounds and marks from
     // them, then it removes them: locks, new workers, and units of food at the nest.
     this.news = { locks: [], workers: 0, food: 0 };
+    // The story shows only the locked bodies with a number of this or less, and it can
+    // hide the free bodies.
+    this.storyLimit = Infinity;
+    this.hideFree = false;
 
     // The body of this player. The page moves it; the server checks the moves.
     // `slide` is the distance from the place where the picture of the body is to the
     // place where the body is: after a lock, the picture goes smoothly to the new body.
-    this.me = { alive: false, x: 0, y: 0, z: 0, heading: 0, phase: 0, carry: false, name: "", color: [1, 1, 1], slideX: 0, slideZ: 0 };
+    // `arrive` is the time when the light of a lock gets to the new body: before that
+    // time, the body has the color of a worker.
+    this.me = { alive: false, x: 0, y: 0, z: 0, heading: 0, phase: 0, carry: false, name: "", color: [1, 1, 1], slideX: 0, slideZ: 0, arrive: -10 };
 
     this.bodies = new Float32Array(BODY_STRIDE * 4096);
     this.bodyCount = 0;
@@ -151,6 +159,7 @@ export class World {
   }
 
   read(buffer, snapshot) {
+    this.inSnapshot = snapshot;
     const view = new DataView(buffer);
     const text = new TextDecoder();
     const w = this.workers;
@@ -247,7 +256,12 @@ export class World {
             const name = text.decode(new Uint8Array(buffer, o + 12, size));
             o += 12 + size;
             this.lockInfo.set(cell, { helper, time, name, n, from: snapshot ? null : this.lockStart(id) });
-            if (!snapshot) this.news.locks.push({ cell, id, name, helper, n });
+            if (!snapshot) {
+              this.news.locks.push({ cell, id, name, helper, n });
+              // The player has a different body now: its picture does not walk there.
+              const player = this.players.get(id);
+              if (player) player.jump = true;
+            }
           }
           break;
         case 8: {
@@ -323,6 +337,9 @@ export class World {
             const id = view.getUint8(o);
             const before = this.piles.get(id);
             const pile = { id, cell: view.getUint16(o + 1, true), units: view.getUint16(o + 3, true), size: view.getUint16(o + 5, true), far: view.getUint8(o + 7) === 1 };
+            // The time when the page saw the pile first. A pile of the snapshot was
+            // there before.
+            pile.born = before ? before.born : snapshot ? -100 : this.time;
             // The time of the last unit that the pile lost while no body can walk to it.
             pile.changed = before ? before.changed : -100;
             if (before && pile.far && pile.units < before.units) pile.changed = this.time;
@@ -393,7 +410,11 @@ export class World {
       time: info.time,
       color: lockedColor(info.helper ? HELPER_COLOR : colorOf(info.name)),
       from: info.from,
-      start: this.time,
+      // The time of the lock on the page. A body of the snapshot locked before.
+      start: this.inSnapshot ? -100 : this.time,
+      // The body goes down a little when a body walks on it, and comes back like a spring.
+      dip: 0,
+      speed: 0,
     };
   }
 
@@ -440,6 +461,12 @@ export class World {
     const grid = this.grid;
     const w = this.workers;
     const speed = this.speed;
+    const locked = this.locked;
+    // The cells of locked bodies that have a free body on them.
+    const loaded = new Set();
+    // The place of the pile that no body can walk to.
+    let far = null;
+    for (const pile of this.piles.values()) if (pile.far) far = [grid.x(pile.cell), grid.z(pile.cell)];
     let free = 0;
 
     for (let id = 0; id < this.workerEnd; id++) {
@@ -459,7 +486,17 @@ export class World {
         w.z[id] += (dz / distance) * step;
         w.heading[id] = turnToward(w.heading[id], Math.atan2(dx, dz), dt * 14);
         w.phase[id] += step * 13;
+        w.still[id] = 0;
+      } else {
+        w.still[id] += dt;
+        // A worker that waits looks to the pile across the river, and its legs do not
+        // stay still: it wants to go across.
+        if (far && !w.carry[id] && w.still[id] > 0.35) {
+          w.heading[id] = turnToward(w.heading[id], Math.atan2(far[0] - w.x[id], far[1] - w.z[id]), dt * 5);
+          w.phase[id] += dt * (5 + 4 * hash01(id * 3));
+        }
       }
+      if (locked.has(cell)) loaded.add(cell);
       const height = this.heightAt(w.x[id], w.z[id]);
       w.y[id] += (height - w.y[id]) * Math.min(1, dt * 12);
     }
@@ -470,9 +507,10 @@ export class World {
       const dx = player.tx - player.x;
       const dz = player.tz - player.z;
       const distance = Math.hypot(dx, dz);
-      if (distance > 6) {
+      if (distance > 6 || player.jump) {
         player.x = player.tx;
         player.z = player.tz;
+        player.jump = false;
       } else if (distance > 0.005) {
         const step = Math.min(distance, Math.max(speed, distance * 8) * dt);
         player.x += (dx / distance) * step;
@@ -481,6 +519,25 @@ export class World {
       }
       player.heading = turnToward(player.heading, player.theading, dt * 12);
       player.y += (this.heightAt(player.x, player.z) - player.y) * Math.min(1, dt * 12);
+      const under = grid.cellAt(player.x, player.z);
+      if (under >= 0 && locked.has(under)) loaded.add(under);
+    }
+    if (this.me.alive) {
+      const under = grid.cellAt(this.me.x, this.me.z);
+      if (under >= 0 && locked.has(under)) loaded.add(under);
+    }
+
+    // The bridge lives: a locked body goes down under a load and comes back like a spring.
+    const time = Math.min(dt, 0.05);
+    for (const body of locked.values()) {
+      const target = loaded.has(body.cell) ? -0.05 : 0;
+      if (body.dip === target && body.speed === 0) continue;
+      body.speed += ((target - body.dip) * 260 - body.speed * 13) * time;
+      body.dip += body.speed * time;
+      if (Math.abs(body.dip - target) < 0.0005 && Math.abs(body.speed) < 0.005) {
+        body.dip = target;
+        body.speed = 0;
+      }
     }
 
     // The picture of the body of this player goes to the place of its new body.
@@ -523,9 +580,9 @@ export class World {
     const decks = this.decks;
     const time = this.time;
 
-    const body = (x, y, z, heading, color, phase, lock, strain, scale, legs) => {
+    const body = (x, y, z, heading, color, phase, lock, strain, scale, legs, out = 1) => {
       bodies[b++] = x; bodies[b++] = y; bodies[b++] = z; bodies[b++] = scale;
-      bodies[b++] = Math.cos(heading); bodies[b++] = Math.sin(heading); bodies[b++] = 1; bodies[b++] = 0;
+      bodies[b++] = Math.cos(heading); bodies[b++] = Math.sin(heading); bodies[b++] = out; bodies[b++] = 0;
       if (strain > 0) {
         // A body with not much support goes red and back, again and again.
         const alarm = strain * (0.3 + 0.2 * (1 + Math.sin(time * 7)));
@@ -547,10 +604,13 @@ export class World {
       shadows[s++] = 0; shadows[s++] = 0; shadows[s++] = 0; shadows[s++] = y > 0.03 ? 0.4 : 0.26;
     };
 
-    for (let id = 0; id < this.workerEnd; id++) {
+    const hide = this.hideFree;
+    for (let id = 0; id < this.workerEnd && !hide; id++) {
       if (!w.alive[id] || !sees(w.x[id], w.z[id])) continue;
       const heading = w.heading[id];
-      body(w.x[id], w.y[id], w.z[id], heading, WORKER_COLOR, w.phase[id], 0, 0, 1, 0);
+      // A worker that waits moves a little to the front and back.
+      const rock = w.still[id] > 0.35 && !w.carry[id] ? 0.045 * Math.sin(time * (2.6 + hash01(id * 5)) + id) : 0;
+      body(w.x[id] + Math.sin(heading) * rock, w.y[id], w.z[id] + Math.cos(heading) * rock, heading, WORKER_COLOR, w.phase[id], 0, 0, 1, 0);
       shadow(w.x[id], w.y[id], w.z[id], 0.3);
       if (w.carry[id]) {
         crumbs[c++] = w.x[id] + Math.sin(heading) * 0.3; crumbs[c++] = w.y[id] + 0.2; crumbs[c++] = w.z[id] + Math.cos(heading) * 0.3; crumbs[c++] = id;
@@ -569,15 +629,20 @@ export class World {
     };
 
     for (const [id, player] of this.players) {
-      if (id === this.you) continue;
+      if (id === this.you || hide) continue;
       body(player.x, player.y, player.z, player.heading, player.color, player.phase, 0, 0, 1.12, 0);
       shadow(player.x, player.y, player.z, 0.34);
       if (player.carry) load(player.x, player.y, player.z, player.heading);
     }
 
     const me = this.me;
-    if (me.alive) {
-      body(me.x + me.slideX, me.y, me.z + me.slideZ, me.heading, me.color, me.phase, 0, 0, 1.12, 0);
+    if (me.alive && !hide) {
+      // After a lock, the new body is the body of a worker until the light gets to it.
+      // Then it gets the color of the player, and it is large for a moment.
+      const since = time - me.arrive;
+      const mine = since >= 0;
+      const pop = mine && since < 0.3 ? 0.3 * (1 - since / 0.3) : 0;
+      body(me.x + me.slideX, me.y, me.z + me.slideZ, me.heading, mine ? me.color : WORKER_COLOR, me.phase, 0, 0, (mine ? 1.12 : 1) + pop, 0);
       shadow(me.x + me.slideX, me.y, me.z + me.slideZ, 0.34);
       if (me.carry) load(me.x + me.slideX, me.y, me.z + me.slideZ, me.heading);
     }
@@ -585,23 +650,35 @@ export class World {
     // The lowest cost of the rule: a body with less support than 2 rows of this is weak.
     const row = this.rule.costs[0];
     for (const locked of this.locked.values()) {
-      if (!sees(locked.x, locked.z)) continue;
-      // A new locked body moves from the place of its free body into its cell.
+      if (locked.n > this.storyLimit || !sees(locked.x, locked.z)) continue;
+      // The moment of a lock: the body goes from the place of its free body down into its
+      // cell in 0.15 seconds. Then its legs go out to the bodies and the land that it touches.
       let x = locked.x;
       let z = locked.z;
-      const age = (this.time - locked.start) / 0.22;
-      if (locked.from && age < 1) {
-        const part = age * age * (3 - 2 * age);
-        x = locked.from[0] + (x - locked.from[0]) * part;
-        z = locked.from[1] + (z - locked.from[1]) * part;
+      let y = -0.02 + locked.dip;
+      let out = 1;
+      const age = time - locked.start;
+      if (age < 0.5) {
+        const part = Math.max(0, Math.min(1, age / 0.15));
+        const ease = part * part * (3 - 2 * part);
+        if (locked.from) {
+          x = locked.from[0] + (x - locked.from[0]) * ease;
+          z = locked.from[1] + (z - locked.from[1]) * ease;
+        }
+        y += 0.2 * (1 - ease);
+        // The legs go out fast, a small distance too far, and come back.
+        const reach = Math.max(0, Math.min(1, (age - 0.1) / 0.16));
+        out = 1 + 3.7 * (reach - 1) ** 3 + 2.7 * (reach - 1) ** 2;
+        // The body goes below its place for a moment when it gets there.
+        if (age > 0.15) y -= 0.05 * Math.sin(Math.min(1, (age - 0.15) / 0.3) * Math.PI);
       }
       const strain = Math.max(0, Math.min(1, (row - locked.support) / row + 0.4)) * (locked.support <= row ? 1 : 0);
-      // All the locked bodies look to the far bank: each leg then has one direction.
-      body(x, -0.02, z, 0, locked.color, 0, 1, strain, 1.0, this.legs(locked.cell));
+      // All the locked bodies look to the north: each leg then has one direction.
+      body(x, y, z, 0, locked.color, 0, 1, strain, 1.0, this.legs(locked.cell), out);
       // A dark plate below the body: the bridge is one structure.
-      decks[d++] = locked.x; decks[d++] = -0.03; decks[d++] = locked.z; decks[d++] = 0;
+      decks[d++] = locked.x; decks[d++] = -0.03 + locked.dip; decks[d++] = locked.z; decks[d++] = 0;
       decks[d++] = 1.12; decks[d++] = 1; decks[d++] = 1.12;
-      decks[d++] = 0.05; decks[d++] = 0.04; decks[d++] = 0.035; decks[d++] = 0.55;
+      decks[d++] = 0.05; decks[d++] = 0.04; decks[d++] = 0.035; decks[d++] = 0.55 * Math.min(1, Math.max(0, age / 0.15));
     }
 
     this.bodyCount = b / BODY_STRIDE;

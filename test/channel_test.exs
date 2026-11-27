@@ -119,6 +119,28 @@ defmodule ColonyWeb.ChannelTest do
     })
   end
 
+  test "a player gets a new name: the next body has it, and the old body keeps its name", %{
+    socket: socket
+  } do
+    cell = move_to_river(socket)
+    ref = push(socket, "lock", %{"cell" => cell})
+    assert_reply(ref, :ok, %{worker: _}, 1000)
+
+    ref = push(socket, "name", %{"name" => "Brisk <b>Fern</b> 12"})
+    assert_reply(ref, :ok)
+    ref = push(socket, "name", %{"name" => 5})
+    assert_reply(ref, :error)
+
+    ref = push(socket, "body", %{"cell" => cell})
+    assert_reply(ref, :ok, %{name: "Ada"})
+    # The name is plain text of 16 characters or fewer.
+    assert %{players: 1} = Colony.Server.stats()
+    ref = push(socket, "story", %{})
+    assert_reply(ref, :ok, %{names: [%{name: "Ada", bodies: 1}]})
+    world = :sys.get_state(Colony.Server).world
+    assert [%{name: "Brisk bFernb 12"}] = Map.values(world.players)
+  end
+
   @tag workers: 0
   test "with no spare body, the lock gets the reply error", %{socket: socket} do
     cell = move_to_river(socket)

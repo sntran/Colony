@@ -5,7 +5,7 @@ defmodule ColonyWeb.WorldChannel do
   Events to the client: "s" (all the state, binary), "t" (the changes of a tick, binary),
   "you" (a message for this player only), "records" (all the records of the bridges) and
   "record" (one record that is new or that changed).
-  Events from the client: "m" (move, binary), "lock", "body", "story" and "ping".
+  Events from the client: "m" (move, binary), "lock", "body", "name", "story" and "ping".
 
   A message with wrong data gets the reply "error" or no reply. It does not stop the channel.
   """
@@ -82,6 +82,15 @@ defmodule ColonyWeb.WorldChannel do
   end
 
   def handle_in("body", _params, socket), do: {:reply, :error, socket}
+
+  # The player has a new name. The page makes the name: a player types no name.
+  def handle_in("name", %{"name" => name}, %{assigns: %{id: id}} = socket)
+      when id != nil and is_binary(name) do
+    Server.rename(id, clean_name(name))
+    {:reply, :ok, socket}
+  end
+
+  def handle_in("name", _params, socket), do: {:reply, :error, socket}
 
   # The players with their bodies and their food, for the story.
   def handle_in("story", _params, socket) do
