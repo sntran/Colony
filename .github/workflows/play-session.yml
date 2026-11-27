@@ -16,7 +16,7 @@ on:
       branch:
         description: The branch that has the game
         type: string
-        default: feat/0003-the-crossing
+        default: feat/0004-the-road-north
       minutes:
         description: How long the server runs (120 or fewer)
         type: number
