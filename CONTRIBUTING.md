@@ -10,9 +10,9 @@ documents, code comments, names, log text and commit messages.
 - Write short sentences: 20 words or fewer for an instruction, 25 words or fewer for a
   description.
 - Use the active voice and the present tense.
-- Use one word for one meaning, and the same word in all the files. The table of words in
-  the plan gives the words of the game: body, player, worker, cell, row, bank, gap, nest,
-  support, scent, tick.
+- Use one word for one meaning, and the same word in all the files. The tables of words in
+  the plans give the words of the game: body, player, worker, cell, row, bank, gap, nest,
+  support, scent, tick, river, pile, helper, reach, record.
 - Give one instruction in each sentence, and start it with the verb.
 - Do not use the "-ing" form of a verb, except in a technical name.
 
@@ -24,6 +24,7 @@ Add no notes about the tools that helped to write the code or the text.
 
 - `README.md` tells what the prototype is, how to start it and how to test it. Keep it
   correct when the behavior changes.
+- `specs/README.md` tells what the contracts say. Keep it correct when a contract changes.
 - Each plan is one file in `docs/plans/`. A plan has a number and a short name.
 - Each play test has a report in `docs/playtests/`, with the same number and name as its
   plan.
@@ -35,10 +36,10 @@ Add no notes about the tools that helped to write the code or the text.
 ## The work
 
 - Work on a branch with the number and the name of the plan, for example
-  `feat/0001-first-prototype`.
+  `feat/0002-players-are-the-bridge`.
 - Do not open a pull request unless I ask for it.
 - Stop and ask me only in two cases: a target of the plan cannot be met after real work, or
-  a change is necessary in the short description of the game (section 1 of the plan).
+  a change is necessary in a section that the plan names for this.
 
 ## The code
 
@@ -51,4 +52,6 @@ Add no notes about the tools that helped to write the code or the text.
 - Each rule of the world has a contract in TLA+ in `specs/`. For a change of a rule,
   change the contract first and run `mix colony.contracts`. Then change the code.
 - Give each change of a rule a test in `test/`. The tests run the world with no browser.
+- A workflow gets no secret, and its token can only read the repo. Give each action its
+  full commit hash. Compare the SHA-256 of each file that a script gets from the network.
 - Run `mix format` and `mix test` before each commit.

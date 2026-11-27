@@ -1,27 +1,33 @@
 # Colony
 
 Colony is a multiplayer game in a browser. Each player controls one small creature: a
-**body**. One body cannot cross a gap. Many bodies can: a body **locks** to the edge of the
-ground or to a locked body, and the locked bodies make a bridge.
+**body**. One body cannot cross a river. Many bodies can: a body **locks** to the edge of
+the bank or to a locked body, and the locked bodies make a bridge.
 
-This repo has the first prototype. "Colony" is a working name.
+This repo has the second version of the prototype. "Colony" is a working name.
 
-- When you lock your body, you leave it. The body stays in the bridge with your name. You
-  get a new body at the nest.
-- **Workers** are bodies that the server controls. They obey simple rules.
+- **The players are the bridge.** When you lock your body, you leave it. The body stays in
+  the bridge with your name. You then take the body of the nearest **worker**.
+- Workers are bodies that the server controls. A worker never locks. It follows scent,
+  carries food, and is a spare body for the players.
 - Players do not chat. You put **scent** on the ground, and the workers follow it.
+- A **pile** of food is on the far bank. When the first food of a pile gets to the nest,
+  the game makes a **record** of the bridge, with the names of its builders.
 - All things in the world come from code. There are no model, image, sound or font files.
 
-The prototype must answer three questions:
+This version must answer three questions:
 
-1. Is it fun for one player to lock bodies and cross a gap?
-2. Can workers build a bridge with a few simple rules?
-3. Can the server hold 1,000 bodies at 10 ticks each second, and can a phone draw them?
+1. Is it fun to be the bridge, alone, in the first 2 minutes?
+2. Do 5 to 20 persons build together with no chat?
+3. Does a person want to see the record of a bridge that has the name of that person?
 
-The plan is [`docs/plans/0001-first-prototype.md`](docs/plans/0001-first-prototype.md).
-The decisions that the plan does not make are in [`docs/decisions.md`](docs/decisions.md).
-The report of the tests is
-[`docs/playtests/0001-first-prototype.md`](docs/playtests/0001-first-prototype.md).
+| | Plan | Report of the tests |
+|---|---|---|
+| Second version | [`0002-players-are-the-bridge.md`](docs/plans/0002-players-are-the-bridge.md) | [`docs/playtests/0002-players-are-the-bridge.md`](docs/playtests/0002-players-are-the-bridge.md) |
+| First version | [`0001-first-prototype.md`](docs/plans/0001-first-prototype.md) | [`docs/playtests/0001-first-prototype.md`](docs/playtests/0001-first-prototype.md) |
+
+The decisions that the plans do not make are in [`docs/decisions.md`](docs/decisions.md).
+The rules of the first version are on the branch `feat/0001-first-prototype`.
 
 ## Start
 
@@ -53,7 +59,30 @@ PORT=8080 mix phx.server
 ```
 
 To play on a phone, open `http://ADDRESS:4000`, where `ADDRESS` is the address of the
-computer on the network.
+computer on the network. For players on other networks, use a play session.
+
+## A play session
+
+The workflow [`play-session.yml`](.github/workflows/play-session.yml) starts the server on
+a runner of GitHub and opens a quick tunnel of Cloudflare to it. The job gets no secret.
+
+1. On GitHub, open "Actions", then "Play session", then "Run workflow".
+2. Set the minutes (60 by default, 120 at most), the number of workers and the number of
+   helpers.
+3. Open the summary of the job. After about one minute it has the address. Give the
+   address to the players.
+4. At the end, the artifact of the run has the world file, the records of the bridges as
+   JSON, and the log of the server.
+
+GitHub shows the button "Run workflow" only when the workflow file is on the default
+branch.
+
+[`scripts/play_session.sh`](scripts/play_session.sh) is the part that runs on the runner.
+It also runs on a computer with Linux:
+
+```sh
+MINUTES=30 HELPERS=2 sh scripts/play_session.sh
+```
 
 ## Play
 
@@ -62,49 +91,81 @@ computer on the network.
 | Move | Arrow keys or W, A, S, D | The stick below the left thumb |
 | Lock | Space | The button "Lock" |
 | Scent | Hold Shift | Hold the button "Scent" |
-| Name and time of a locked body | Click the body | Tap the body |
+| Name, time and count of a locked body | Click the body | Tap the body |
+| The list of the records | Click the button with the bridge sign | Tap the button with the bridge sign |
 
-Go to the gap. The cells where a lock is possible show at your body. The button "Lock" is
-bright when a lock is possible. One second after a lock, you have a new body at the nest.
+Go to the river. The far bank has a light where the pile is. The cells where a lock is
+possible show at your body, and the button "Lock" is bright when a lock is possible.
 
-A bridge one cell wide stops after 7 rows. Lock a body beside a body of the bridge to make
-the bridge stronger. A locked body that is red and shakes has almost no support.
+Before a lock, marks on the river show the **reach**: one mark on each row that the bridge
+can get to, if you lock there and then continue one body wide. A green mark on the far
+bank tells that the bridge can get across. Select a cell beside a body, and the marks go
+farther: each body beside a body helps.
 
-Hold "Scent" and go from the nest to the gap. The workers follow the scent, build a bridge
-and carry food to the nest.
+After a lock, you have the body of the nearest worker that carries no food. The camera
+goes to it. That body cannot lock for 1 second. If the colony has no worker that you can
+get to, you get a new body at the nest after 3 seconds.
+
+A bridge one body wide stops after 7 rows. Two bodies wide stops after 15 rows, and three
+bodies wide after 23.
+
+Hold "Scent" and go from the nest to the bridge. The workers follow the scent. They wait
+at the end of the bridge, and they are your next bodies. When the bridge is complete, they
+carry food to the nest.
+
+The top of the page shows two numbers: the free workers (the bodies that the colony can
+still use) and the food at the nest. The nest makes 1 worker for each 10 units of food.
+
+A pile has 300 units. From the first lock, the pile loses 1 unit each second until the
+first worker takes food. Thus a fast bridge gives more food. When a pile is empty, the
+next pile appears across a wider place of the river.
+
+At the first food of a pile, each player with a body in the bridge sees the record for 5
+seconds: the names, the number of bodies of each name, the rows and the seconds.
+
+A **helper** is a body that the server controls with the rules of a player. It is grey,
+and its name is "Helper 1", "Helper 2" and so on. `COLONY_HELPERS` sets the number.
 
 ### Options in the address
 
 - `?stats=1` shows the frames each second, the number of bodies, the delay to the server
   and the bytes each second.
-- `?demo=1` runs with no input. Scent goes from the nest to the gap. The workers build the
-  bridge and carry food. The camera moves slowly.
+- `?demo=1` runs with no input. Four helpers build a bridge to the pile, slowly. Then the
+  workers carry food. The camera follows the helpers.
 - `?scale=1` sets the number of canvas pixels for each page pixel. Without it, the page
   uses 2 at most, and fewer if the picture is slow.
 
 ## Config
 
 All the numbers of the game are in [`config/game.exs`](config/game.exs): the size of the
-grid, the support rule, the scent, the number of workers, the food and the save file.
-Start the server again after a change.
+grid, the river, the piles, the support rule, the workers, the helpers, the scent and the
+save file. Start the server again after a change.
 
 These values from the environment change the config for one run:
 
 | Name | Meaning |
 |---|---|
 | `PORT` | The port of the server. The default is 4000. |
-| `COLONY_WORKERS` | The number of workers. The default is 200. |
-| `COLONY_SEED` | The seed of the ground for a new world. |
+| `COLONY_WORKERS` | The number of workers at the start. The default is 30. |
+| `COLONY_HELPERS` | The number of helpers. The default is 0. |
+| `COLONY_SEED` | The seed of the ground and of the river for a new world. |
 | `COLONY_SAVE_FILE` | The path of the save file. |
 
 ## Save
 
 The server saves the world to `priv/data/world.bin` each 30 seconds and when it stops. It
-saves the seed, the locked bodies with names and times, the scent and the food. It loads
-the file at the start.
+saves the seed, the locked bodies with names, times and counts, the workers, the scent,
+the pile, the food and the records. It loads the file at the start. A save file of the
+first version gives a new world.
 
 Stop the server with the signal `TERM` (for example `kill PID`), and it saves first. Two
 times Ctrl+C stops the VM immediately: the world is then as it was at the last save.
+
+To print the records of the save file as JSON:
+
+```sh
+mix colony.records
+```
 
 To start with a new world, stop the server, then:
 
@@ -122,15 +183,19 @@ mix test
 
 The tests run the world with no browser. They show the results that the plan asks for:
 
-1. A bridge one cell wide stops at 7 rows. A bridge two cells wide crosses 12 rows.
-2. When a body falls, the bodies that lose their support fall also.
-3. With 200 workers and scent from the nest to the gap, the workers complete a bridge and
-   bring food in less than 5 minutes of world time.
-4. When the scent goes away, all locked workers let go. Locked bodies of players stay if
-   they have support.
-5. Save and load give the same world.
-
-The tests also check the world against its contracts: see "Contracts" below.
+1. With scent from the nest to the river and no player, no body locks in 5 minutes.
+2. A bridge one body wide stops at 7 rows, two wide at 15, three wide at 23.
+3. The calculation with integers gives the same result as a full calculation.
+4. After a lock, the player has the body of the nearest free worker in the next tick.
+   With no free worker, the player is at the nest after 3 seconds.
+5. Ten units of food make one worker. With fewer than 5 free workers, the nest makes one
+   worker each 10 seconds.
+6. A pile loses units from the first lock to the first food. An empty pile makes the next
+   pile at a wider place.
+7. A record has the correct names, numbers and times. Save and load keep the records.
+8. Four helpers complete the first bridge in less than 60 seconds of world time, and
+   bring food across 12 rows in less than 5 minutes.
+9. The world obeys its contracts: see "Contracts" below.
 
 ### Contracts
 
@@ -139,13 +204,13 @@ checker in Elixir ([accord](https://github.com/sntran/accord/tree/feat/native-tl
 looks at all the states of small models of these contracts. Java is not necessary.
 
 ```sh
-mix colony.contracts          # the usual models, about 1 minute
-mix colony.contracts --all    # and a larger model
+mix colony.contracts          # all the models, about 20 seconds
+mix colony.contracts Bridge   # one model
 ```
 
 `mix test` also puts a contract between a test player and the real world as a monitor.
 Each message, each reply and each event of the world must be a step that the contract
-permits. `mix test --include slow` also runs the checks that take minutes.
+permits.
 
 ### Load test
 
@@ -153,28 +218,25 @@ permits. `mix test --include slow` also runs the checks that take minutes.
 mix colony.load
 ```
 
-The task runs 1,000 workers and 20 clients for 5 minutes at 10 ticks each second. It
-prints the tick time (median, 95th and 99th percentile), the memory, and the bytes each
-second for each client. For a short run: `mix colony.load --seconds 30`.
+The task runs 1,000 workers, 20 clients and 8 helpers for 5 minutes at 10 ticks each
+second. It prints the tick time (median, 95th and 99th percentile), the memory, and the
+bytes each second for each client. For a short run: `mix colony.load --seconds 30`.
 
 ### Play test
 
 Play in a real browser. The steps and the last results are in the report in
-`docs/playtests/`. For the test with no workers:
+`docs/playtests/`.
 
-```sh
-COLONY_WORKERS=0 COLONY_SAVE_FILE=/tmp/alone.bin mix phx.server
-```
-
-The scripts in `test/play/` do the play tests of the plan in Chromium, with real touch
-events and real key events. They start and stop the server, and they write the screenshots
-of the report. They need Node.js and Playwright. Stop your server first: the scripts use
-port 4000.
+The scripts in `test/play/` do the play tests of the plan in Chromium at 390 x 844, with
+real touch events: one thumb stays on the stick while the other thumb taps "Lock" or holds
+"Scent". They start and stop the server, and they write the screenshots of the report.
+They need Node.js and Playwright. Stop your server first: the scripts use port 4000.
 
 ```sh
 npm install playwright
 npx playwright install chromium
-node test/play/run.js
+node test/play/run.js              # all the tests
+node test/play/run.js alone demo   # some tests: alone, helpers, two, demo
 ```
 
 ## The code
@@ -182,17 +244,19 @@ node test/play/run.js
 | Path | Contents |
 |---|---|
 | `config/game.exs` | All the numbers of the game. |
-| `lib/colony/grid.ex` | The grid of hexagonal cells. |
-| `lib/colony/support.ex` | The support rule. |
+| `lib/colony/grid.ex` | The grid of hexagonal cells, and the river. |
+| `lib/colony/support.ex` | The support rule and the reach. |
 | `lib/colony/world.ex` | The state of the world and its step. It has no process and no clock. |
 | `lib/colony/workers.ex` | The rules of the workers. |
+| `lib/colony/helpers.ex` | The rules of the helpers. |
 | `lib/colony/protocol.ex` | The binary messages. |
 | `lib/colony/store.ex` | The save file. |
 | `lib/colony/server.ex` | The process that moves the world 10 times each second. |
 | `lib/colony_web/` | The Phoenix endpoint, the channel and the plug that sends the page. |
-| `lib/mix/tasks/` | `mix colony.reset`, `mix colony.load` and `mix colony.contracts`. |
+| `lib/mix/tasks/` | `mix colony.reset`, `mix colony.records`, `mix colony.load` and `mix colony.contracts`. |
 | `specs/` | The contracts of the world in TLA+, and their models. |
 | `priv/static/` | The page: one HTML file and JavaScript modules. It draws with WebGL2. |
+| `scripts/play_session.sh` | The server and the tunnel of a play session. |
 | `test/` | The automatic tests. `test/play/` has the play tests in a browser. |
 
 The rules for a change are in [`CONTRIBUTING.md`](CONTRIBUTING.md).
