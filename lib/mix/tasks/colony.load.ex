@@ -1,13 +1,17 @@
 defmodule Mix.Tasks.Colony.Load do
-  @shortdoc "Runs the load test: 1,000 workers, 20 clients and 8 helpers for 5 minutes"
+  @shortdoc "Runs the load test: a world of 20 rivers, 20 clients and 8 helpers for 5 minutes"
 
   @moduledoc """
-  Runs the load test of plan 0001, in the world of plan 0003.
+  Runs the load test of plan 0004, section 5.2, with the targets of plan 0001.
 
-      mix colony.load [--seconds 300] [--workers 1000] [--clients 20] [--helpers 8] [--port 4010]
+      mix colony.load [--seconds 300] [--rivers 20] [--locked 2000] [--carriers 150]
+                      [--spare 200] [--clients 20] [--helpers 8] [--port 4010]
 
-  The task starts the server with a new world that it does not save to the usual file.
-  The helpers build the bridges, and the workers carry food.
+  The task makes a long world first: the colony crosses `rivers` rivers, and it has
+  `locked` locked bodies or more. The locks of this world go fast, with no walk. Then the
+  task starts the server with this world, with `carriers` carriers and `spare` spare
+  bodies, in a file that is not the usual file. The helpers build the next bridge, and
+  the carriers carry food.
   Each client is a real WebSocket connection. It joins the channel as a player, moves
   10 times each second near the nest, and counts the bytes that it gets.
 
@@ -17,7 +21,7 @@ defmodule Mix.Tasks.Colony.Load do
 
   use Mix.Task
 
-  alias Colony.{Grid, Protocol, Server}
+  alias Colony.{Grid, Protocol, Server, Store, World}
 
   @impl true
   def run(args) do
@@ -25,7 +29,10 @@ defmodule Mix.Tasks.Colony.Load do
       OptionParser.parse!(args,
         strict: [
           seconds: :integer,
-          workers: :integer,
+          rivers: :integer,
+          locked: :integer,
+          carriers: :integer,
+          spare: :integer,
           clients: :integer,
           helpers: :integer,
           port: :integer
@@ -33,7 +40,10 @@ defmodule Mix.Tasks.Colony.Load do
       )
 
     seconds = opts[:seconds] || 300
-    workers = opts[:workers] || 1000
+    rivers = opts[:rivers] || 20
+    locked = opts[:locked] || 2000
+    carriers = opts[:carriers] || 150
+    spare = opts[:spare] || 200
     clients = opts[:clients] || 20
     helpers = opts[:helpers] || 8
     port = opts[:port] || 4010
@@ -47,13 +57,17 @@ defmodule Mix.Tasks.Colony.Load do
       :colony
       |> Application.fetch_env!(:game)
       |> Keyword.merge(
-        workers: workers,
-        workers_max: max(workers, 200),
+        carriers_max: max(carriers, 150),
+        spare_max: max(spare, 200),
         helpers: helpers,
-        save_file: save_file
+        save_file: save_file,
+        seed: 2027
       )
 
     Application.put_env(:colony, :game, game)
+    Mix.shell().info("Making a world of #{rivers} crossings and #{locked} locked bodies or more.")
+    world = long_world(game, rivers, locked)
+    :ok = Store.save(save_file, %{World.to_save(world) | workers: %{carrier: carriers, spare: spare}})
 
     endpoint =
       :colony
@@ -65,11 +79,13 @@ defmodule Mix.Tasks.Colony.Load do
     Mix.Task.run("app.start")
 
     rate = Keyword.fetch!(game, :tick_rate)
-    {nest_row, nest_col} = Keyword.fetch!(game, :nest)
-    nest = {nest_col + 0.5 * rem(nest_row, 2), nest_row * Grid.row_step()}
+    world = :sys.get_state(Server).world
+    nest = Grid.center(world.grid, world.nest)
 
     Mix.shell().info(
-      "Load test: #{workers} workers, #{clients} clients, #{helpers} helpers, #{seconds} s, " <>
+      "Load test: #{World.rivers(world)} rivers in the grid, #{world.stage - 1} crossings, " <>
+        "#{map_size(world.locked)} locked bodies, #{World.carriers(world)} carriers, " <>
+        "#{World.spare(world)} spare bodies, #{clients} clients, #{helpers} helpers, #{seconds} s, " <>
         "#{rate} ticks each second."
     )
 
@@ -144,8 +160,38 @@ defmodule Mix.Tasks.Colony.Load do
         mean                       #{round(Enum.sum(rates) / length(rates))}
         maximum                    #{round(worst)}   (target: 30,000 or less) #{verdict(worst <= 30_000)}
       ticks each second that a client got, minimum  #{Float.round(Enum.min(ticks), 2)}
-      world at the end             #{stats.free_workers} spare bodies, #{stats.locked} locked bodies, #{stats.players} players, #{stats.helpers} helpers, #{stats.scent_cells} cells with scent, #{stats.food_nest} food at the nest, #{stats.stage - 1} crossings, #{stats.records} records
+      world at the end             #{stats.carriers} carriers, #{stats.spare} spare bodies, #{stats.locked} locked bodies, #{stats.players} players, #{stats.helpers} helpers, #{stats.scent_cells} cells with scent, #{stats.food_nest} food at the nest, #{stats.stage - 1} crossings, #{stats.records} records
     """)
+  end
+
+  # A world where the colony crossed `rivers` rivers and has `locked` locked bodies or more.
+  # A player locks into a random open cell with no walk: the rules of the lock are the
+  # rules of the game.
+  defp long_world(game, rivers, locked) do
+    :rand.seed(:exsss, 2027)
+    {world, id} = World.join(World.new(Keyword.merge(game, helpers: 0)), "Load builder")
+
+    world =
+      Stream.iterate(world, &place(&1, id))
+      |> Enum.find(&(&1.stage > rivers and map_size(&1.locked) >= locked))
+
+    World.leave(world, id)
+  end
+
+  defp place(world, id) do
+    cell = world.open |> Map.keys() |> Enum.random()
+    stand = world.grid |> Grid.neighbors(cell) |> Enum.find(&World.walkable?(world, &1))
+    {x, z} = Grid.center(world.grid, stand)
+    player = %{world.players[id] | x: x, z: z, cell: stand, ready_tick: 0, carry: nil}
+    world = World.put_player(world, id, player)
+    pile = max(1, world.stage - 1)
+
+    world =
+      if World.spare(world) == 0, do: World.add_nest_food(world, pile, 5), else: world
+
+    {:ok, world} = World.lock(world, id, cell)
+    # The events of these locks go to no client.
+    elem(World.take_events(world), 0)
   end
 
   defp verdict(true), do: "OK"

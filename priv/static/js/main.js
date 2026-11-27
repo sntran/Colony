@@ -534,11 +534,13 @@ function moveCamera(dt, time) {
     return;
   }
   if (look) {
-    // A slow camera goes along the world, from the nest to the north and back.
+    // A slow camera goes along the colony, from the nest to the river of the next bridge
+    // and back. In a long world, the old lands are behind the nest.
     const north = world.stage <= grid.rivers.length ? grid.rivers[world.stage - 1].start + 8 : grid.rows - 4;
     const part = 0.5 - 0.5 * Math.cos(time * 0.05);
+    const south = Math.max(4, grid.z(world.nest) - 6);
     x = grid.x(world.nest) + Math.sin(time * 0.07) * 6;
-    z = 4 + part * (north * ROW_STEP - 4);
+    z = south + part * Math.max(0, north * ROW_STEP - south);
     turn = 0.25 * Math.sin(time * 0.09);
     const tall = canvas.clientWidth < canvas.clientHeight ? 1.5 : 1;
     height = 8.2 * tall;

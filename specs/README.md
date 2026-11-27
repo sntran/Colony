@@ -11,9 +11,12 @@ I use each contract in two ways:
 2. **The tests follow the real world against the contract.** Each change of the real
    world must be a step that the contract permits.
 
-The contracts have the rules of [plan 0003](../docs/plans/0003-the-crossing.md): a lock
-is possible only into an open cell, a lock uses one spare body, a complete bridge takes
-no more bodies, and a worker never locks. The support rule is the rule of plan 0002.
+The contracts have the rules of [plan 0003](../docs/plans/0003-the-crossing.md) and of
+[plan 0004](../docs/plans/0004-the-road-north.md): a lock is possible only into an open
+cell, a lock uses one spare body and never a carrier, the number of carriers never
+decreases, a player who carries food cannot lock, a complete bridge takes no more bodies,
+the nest moves only at a crossing, and a worker never locks. The support rule is the rule
+of plan 0002.
 
 ## The files
 
@@ -27,8 +30,8 @@ no more bodies, and a worker never locks. The support rule is the rule of plan 0
 | `BridgeTwoWide.tla`, `.cfg` | The numbers of the plan on a grid two cells wide: "two bodies wide stops at 15 rows". |
 | `BridgeThreeWide.tla`, `.cfg` | The numbers of the plan on a grid three cells wide: "three bodies wide stops at 23 rows". |
 | `BridgeNineRows.tla`, `.cfg` | The numbers of the plan on a river of 9 rows: each complete bridge has 10 bodies. 632 states. |
-| `Colony.tla` | The contract between a player and the world: join, move, lock, the spare bodies, the body of a worker. |
-| `Colony.cfg` | A river 2 cells wide and 3 rows, with one player and 0 to 2 workers at the start. 297 states. |
+| `Colony.tla` | The contract between a player and the world: join, move, lock, the spare bodies, the carriers, the food of a player, the nest, the body of a worker. |
+| `Colony.cfg` | A river 2 cells wide and 3 rows, with one player, 0 to 2 spare bodies and 0 or 1 carrier at the start. 1,728 states. |
 | `ColonyPlay.cfg` | A river 6 cells wide and 4 rows, with two players. The monitor test makes a real world from it. |
 
 The supports and the costs are the integers of `lib/colony/support.ex`: the land support 8
@@ -39,7 +42,7 @@ does after 7 rows with the numbers of the plan.
 A cell is the same integer as in `lib/colony/grid.ex`: `row * Width + column`. `River` is
 a sequence: the width of the river in each column. The module has one river: the rows
 before it are the near bank, and the rows after it are the far bank. The world of the
-game has four rivers, and the rule for each river is this module. `StartCols` has the
+game has no end, and the rule for each river is this module. `StartCols` has the
 columns where the first body of a bridge can lock.
 
 ## What the contracts say
@@ -65,7 +68,8 @@ Always true (the checker looks at each state):
 - `NeverStuck`: a bridge with no open cell is complete. No bridge stops before the far
   bank.
 - `FreeBodiesOnGround`: a free body is never in the river with no locked body below it.
-- `NoBodyNoPlace`: a player who is not in the world has no place of its own.
+- `NoBodyNoPlace`: a player who is not in the world has no place of its own, no body
+  that rests and no food.
 - `TypeOK`: the number of spare bodies is never less than 0, and a player in the world
   always has a body.
 
@@ -75,8 +79,12 @@ True for each step:
 - `ForwardFirst`: while a cell is ahead, each lock is into a cell that is ahead.
 - `CompleteTakesNoMore`: a complete bridge gets no more bodies.
 - `LockOnlyOpen`: each new body is in an open cell.
-- `LockUsesSpare`: each lock uses one spare body. The spare bodies are the workers: thus
-  each new locked body is the body of a player or of a helper, and a worker never locks.
+- `LockUsesSpare`: each lock uses one spare body. Thus each new locked body is the body
+  of a player or of a helper, and a worker never locks.
+- `LockNeverUsesCarrier`: a lock does not change the number of carriers.
+- `CarriersNeverDecrease`: no step decreases the number of carriers.
+- `NoLockWithFood`: a player who carries food cannot lock.
+- `NestMovesAtCrossing`: the nest moves only at the step that makes a bridge complete.
 - `PlayerKeepsBody`: a lock does not take the player out of the world.
 - `TakenBodyRests`: after a lock, the player cannot lock before the rest is at its end.
 - `NewBodyAtNest`: a player who comes into the world starts at the nest.
@@ -94,10 +102,12 @@ The results of the plans:
   first width of the table of plan 0003, section 4.5, where a bridge must get wider.
 - `FourBodies`: the same result with small numbers, in `BridgeOpen`.
 
-The contracts do not have the workers. A worker never locks, thus a worker changes no
-locked body. The contract has the number of spare bodies: a lock subtracts one, and the
-event `WorkerMade` adds one. The lock reply says this about workers: the player gets the
-body of a worker at a cell that a body can get to on foot from the locked body.
+The contracts do not have the places of the workers. A worker never locks, thus a worker
+changes no locked body. The contract has the number of spare bodies and of carriers: a
+lock subtracts one spare body, the event `WorkerMade` adds one, and the event
+`CarrierMade` adds one carrier. The events `FoodTaken` and `FoodGiven` are the food of a
+player. The lock reply says this about workers: the player gets the body of a spare body
+at a cell that a body can get to on foot from the locked body.
 
 ## How to check
 
@@ -116,9 +126,10 @@ of accord. It needs `--no-deadlock` for the bridge modules: the task does not re
 ## The tests with the real world
 
 - `test/contract_monitor_test.exs` puts `Accord.Spec.Monitor` between a test player and a
-  real world (`Colony.World`) with the numbers of `ColonyPlay.cfg`. Two players send 220
-  random messages in each of 4 runs: moves, locks, join and leave. One helper builds, and
-  the workers are the spare bodies. Each message, each reply and each event must be a
+  real world (`Colony.World`) with the numbers of `ColonyPlay.cfg`. Two players send up
+  to 220 random messages in each of 4 runs: moves, locks, join and leave. One helper
+  builds. The contract has one river: a run stops at the crossing, because the world then
+  gets the next river. Each message, each reply and each event must be a
   step of `Colony.tla`. After each message the monitor compares the locked bodies, the
   number of spare bodies and the body of each player with the contract.
 - The same file gives the world a wrong land support. The monitor reports the first lock

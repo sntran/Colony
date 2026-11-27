@@ -1,6 +1,6 @@
 // The play tests of plan 0004, section 5.3, in a browser.
 //
-//     node test/play/run.mjs [deadscreen] [two] [slow] [bodies] [longworld] [moments]
+//     node test/play/run.mjs [slow] [deadscreen] [bodies] [two] [longworld] [shots]
 //
 // With no name, all the tests run. Each test starts the server with a new world and stops
 // it. Stop your server first: the tests use port 4000. Test 2 (fast players with no
@@ -11,8 +11,10 @@
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { copyFileSync } from "node:fs";
 import { startServer } from "./server.mjs";
 import { launch, open, playNew } from "./browser.mjs";
+import { run as crowd } from "./crowd.mjs";
 
 const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
 const SHOTS = path.join(root, "docs/playtests/0004");
@@ -26,7 +28,79 @@ function check(test, text, ok, value = "") {
 }
 const sleep = (time) => new Promise((resolve) => setTimeout(resolve, time));
 
+// The frame time of a page: the median and the 90th percentile of 120 frames, in
+// milliseconds, and the parts of the world that the page drew. The page draws with all
+// its pixels for the measure.
+async function frameTime(session) {
+  return session.page.evaluate(async () => {
+    const renderer = window.colony.renderer;
+    const scale = renderer.scale;
+    renderer.scale = 1;
+    const times = [];
+    let last = performance.now();
+    for (let i = 0; i < 121; i++) {
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+      const now = performance.now();
+      if (i > 0) times.push(now - last);
+      last = now;
+    }
+    renderer.scale = scale;
+    times.sort((a, b) => a - b);
+    return { median: Number(times[60].toFixed(1)), p90: Number(times[108].toFixed(1)), parts: renderer.partsDrawn, all: renderer.parts.length };
+  });
+}
+
+// The sizes of the messages that a page gets in its first seconds, in bytes.
+function countMessages(session) {
+  const sizes = [];
+  const start = Date.now();
+  return session.context.newCDPSession(session.page).then(async (cdp) => {
+    await cdp.send("Network.enable");
+    cdp.on("Network.webSocketFrameReceived", (event) => {
+      if (Date.now() - start > 10000) return;
+      const data = event.response.payloadData;
+      sizes.push(event.response.opcode === 2 ? Math.floor((data.length * 3) / 4) : data.length);
+    });
+    return sizes;
+  });
+}
+
 const tests = {
+  // 1. One slow player, 15 minutes.
+  async slow() {
+    const minutes = Number(process.env.SLOW_MINUTES || 15);
+    for (const seed of SEEDS) {
+      const server = await startServer({ helpers: 0, seed });
+      const browser = await launch();
+      try {
+        const session = await open(browser);
+        const crossings = [];
+        let stage = 1;
+        const final = await playNew(session, {
+          slow: true,
+          seed,
+          limit: minutes * 60,
+          done: () => false,
+          each: async (state, seconds) => {
+            for (; stage < state.stage; stage++) crossings.push({ river: stage, seconds: Math.round(seconds), spare: state.spare });
+          },
+        });
+        const firstFood = final.times.firstFood === null ? null : (final.times.firstFood - final.times.load) / 1000;
+        const river5 = crossings.find((crossing) => crossing.river === 5);
+        const spare = crossings.filter((crossing) => crossing.river >= 2 && crossing.river <= 5);
+        console.log(`  seed ${seed}: ${final.locks} locks, ${final.stage - 1} crossings, ${final.food} food, crossings ${JSON.stringify(crossings)}, the longest time with no guide and no bright button ${session.longestIdle.toFixed(1)} s`);
+        check("slow", `seed ${seed}: the first food is at the nest in less than 60 seconds`, firstFood !== null && firstFood < 60, firstFood === null ? "no food" : `${firstFood.toFixed(0)} s`);
+        check("slow", `seed ${seed}: the player crosses river 5 in less than 12 minutes`, Boolean(river5) && river5.seconds < 720, river5 ? `${river5.seconds} s` : `${final.stage - 1} crossings`);
+        check("slow", `seed ${seed}: never more than 20 seconds with no guide and no bright button`, session.longestIdle <= 20, `${session.longestIdle.toFixed(1)} s`);
+        check("slow", `seed ${seed}: 60 spare bodies or fewer at the crossings of rivers 2 to 5`, spare.length === 4 && spare.every((crossing) => crossing.spare <= 60), spare.map((crossing) => `${crossing.river}: ${crossing.spare}`).join(", "));
+        check("slow", `seed ${seed}: the page has no error`, session.errors.length === 0, session.errors.slice(0, 2).join(" | "));
+      } finally {
+        await browser.close();
+        await server.stop();
+      }
+    }
+  },
+
   // 3. The dead screen: 4 carriers, 3 spare bodies and one fast player for 3 minutes.
   async deadscreen() {
     for (const seed of SEEDS) {
@@ -149,6 +223,141 @@ const tests = {
     } finally {
       await browser.close();
       await server.stop();
+    }
+  },
+
+  // 6. A long world: 20 fast clients for 20 minutes. Then a browser opens the game and the
+  // story: the frame time, the size of the first messages and the size of the picture.
+  async longworld() {
+    const minutes = Number(process.env.LONG_MINUTES || 20);
+    const server = await startServer({ helpers: 0, seed: SEEDS[0], save: path.join(root, "tmp/long-world.bin") });
+    try {
+      // The young world, for a comparison.
+      let browser = await launch();
+      let session = await open(browser);
+      await sleep(3000);
+      const young = { frames: await frameTime(session), rivers: (await session.page.evaluate(() => window.colony.world.grid.rivers.length)) };
+      await browser.close();
+
+      const result = await crowd(20, minutes, (...words) => console.log("  ", ...words));
+      console.log(`  20 fast clients, ${minutes} minutes: ${result.crossed} crossings`);
+
+      browser = await launch();
+      const sizes = [];
+      session = await open(browser, "", false, null);
+      // The page opened before the count: open it again with the count.
+      const counter = await countMessages(session);
+      await session.page.reload();
+      await session.page.waitForFunction(() => window.colony && window.colony.world.ready);
+      await sleep(4000);
+      sizes.push(...counter);
+      const world = await session.page.evaluate(() => ({ rivers: window.colony.world.grid.rivers.length, rows: window.colony.world.grid.rows, locked: window.colony.world.locked.size, stage: window.colony.world.stage }));
+      const old = { frames: await frameTime(session) };
+      const largest = [...sizes].sort((a, b) => b - a);
+      await session.tapOn("storyButton");
+      await session.page.waitForFunction(() => window.colony.story.state().phase === "play");
+      const story = await session.page.evaluate(() => window.colony.story.state());
+      await session.tapOn("storyClose");
+      await session.page.waitForFunction(() => window.colony.story.state().phase === "end");
+      await sleep(3000);
+      await session.shot(path.join(SHOTS, "story-long-world.jpg"));
+      const picture = await session.page.evaluate(async () => {
+        const result = await window.colony.picture();
+        return { bytes: Math.floor(((result.data.length - result.data.indexOf(",") - 1) * 3) / 4), parts: window.colony.story.pictureParts, names: result.names.length };
+      });
+      console.log(`  the young world (${young.rivers} rivers): frame time ${JSON.stringify(young.frames)}`);
+      console.log(`  the long world (${world.stage - 1} crossings, ${world.rivers} rivers, ${world.rows} rows, ${world.locked} locked bodies): frame time ${JSON.stringify(old.frames)}`);
+      console.log(`  the first messages: ${largest.slice(0, 3).join(", ")} bytes, all ${sizes.reduce((a, b) => a + b, 0)} bytes in ${sizes.length} messages`);
+      console.log(`  the story: ${story.total} bodies in ${story.seconds} s. The picture: ${picture.bytes} bytes, ${picture.parts} parts, ${picture.names} names`);
+      check("longworld", "the colony crossed 20 rivers or more", result.crossed >= 20, `${result.crossed}`);
+      check("longworld", "the frame time does not increase in the long world", old.frames.median <= young.frames.median * 1.25, `${young.frames.median} ms and ${old.frames.median} ms`);
+      check("longworld", "the story takes 40 seconds at the most", story.seconds <= 40, `${story.seconds} s`);
+      check("longworld", "the page has no error", session.errors.length === 0, session.errors.slice(0, 2).join(" | "));
+      await browser.close();
+    } finally {
+      await server.stop();
+    }
+  },
+
+  // The screenshots of section 5.3.
+  async shots() {
+    const shot = (session, name) => session.shot(path.join(SHOTS, `${name}.jpg`));
+    const server = await startServer({ helpers: 0, seed: SEEDS[0] });
+    const browser = await launch();
+    try {
+      const session = await open(browser);
+      const taken = new Set();
+      const once = async (name, ok) => {
+        if (!ok || taken.has(name)) return;
+        taken.add(name);
+        await shot(session, name);
+      };
+      let stage = 1;
+      let crossedAt = null;
+      await playNew(session, {
+        limit: Number(process.env.SHOT_SECONDS || 360),
+        done: () => taken.size >= 12,
+        each: async (state, seconds) => {
+          const guide = await session.page.evaluate(() => {
+            const current = window.colony.player.current;
+            const { world } = window.colony;
+            const gains = [...world.open.values()];
+            return { kind: current ? current.kind : null, mark: Boolean(window.colony.view().mark), wider: gains.some((gain) => gain > 0) && gains.some((gain) => gain < world.openBest) };
+          });
+          await once("workers", seconds > 4 && state.carriers > 0 && state.spare > 0);
+          await once(`button-${state.button}`, true);
+          await once(`guide-${guide.kind}`, guide.kind !== null && guide.mark);
+          await once("wider", guide.wider);
+          if (state.stage > stage) {
+            stage = state.stage;
+            crossedAt = seconds;
+          }
+          // Some seconds after a crossing: the carriers carry the eggs to the new nest.
+          await once("nest-move", crossedAt !== null && seconds - crossedAt > 7 && stage >= 2);
+        },
+      });
+      console.log(`  screenshots: ${[...taken].sort().join(", ")}`);
+    } finally {
+      await browser.close();
+      await server.stop();
+    }
+
+    // Lands 5 to 8 and the story of a world with 10 rivers: a world that the script
+    // tmp/make-long.exs made. Without the file, these screenshots are not made.
+    const long = path.join(root, "tmp/long10.bin");
+    const copy = path.join(root, "tmp/long10-play.bin");
+    try {
+      copyFileSync(long, copy);
+    } catch (_) {
+      console.log("  no tmp/long10.bin: no screenshot of lands 5 to 8 and of the story");
+      return;
+    }
+    const server2 = await startServer({ save: copy, keep: true });
+    const browser2 = await launch();
+    try {
+      const session = await open(browser2);
+      await sleep(2000);
+      // The camera looks at lands 5 to 8 from high above.
+      await session.page.evaluate(() => {
+        const { world, camera } = window.colony;
+        const grid = world.grid;
+        const z = ((grid.rivers[5].start + grid.rivers[8].start) / 2) * 0.866;
+        window.colony.freeze(true);
+        Object.assign(camera, { x: 30, z: z - 8, height: 46, distance: 58, turn: 0 });
+      });
+      await session.shot(path.join(SHOTS, "lands-5-to-8.jpg"));
+      await session.page.evaluate(() => window.colony.freeze(false));
+      await session.tapOn("storyButton");
+      await session.page.waitForFunction(() => window.colony.story.state().phase === "play");
+      await sleep(6000);
+      await session.shot(path.join(SHOTS, "story-10-rivers-play.jpg"));
+      await session.tapOn("storyClose");
+      await sleep(3500);
+      await session.shot(path.join(SHOTS, "story-10-rivers.jpg"));
+      console.log("  screenshots: lands-5-to-8, story-10-rivers-play, story-10-rivers");
+    } finally {
+      await browser2.close();
+      await server2.stop();
     }
   },
 };
