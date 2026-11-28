@@ -652,8 +652,9 @@ function drawLabels(now) {
     text(element.lastChild, `${pile.units}`);
   }
 
-  // An old nest is a mark with the number of its land.
-  for (const old of world.oldNests) {
+  // An old nest is a mark with the number of its land. The story does not show these
+  // numbers: in the view from above of a long world, they are on top of each other.
+  for (const old of story.running ? [] : world.oldNests) {
     const element = label(`n${old.cell}`, "oldnest", grid.x(old.cell), 0.4, grid.z(old.cell));
     if (!element) continue;
     if (!element.firstChild) element.append(sign("nest"), document.createElement("span"));

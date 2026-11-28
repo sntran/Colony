@@ -10,7 +10,8 @@ import { colorOf, cssColor, HELPER_COLOR } from "./names.js";
 const LEAST_SECONDS = 6;
 const MOST_SECONDS = 40;
 const SECONDS_EACH_LOCK = 0.25;
-// The picture has this many pixels in its length at the most.
+// A long picture has about this many pixels in its length, but not less than one canvas
+// pixel for each page pixel.
 const PICTURE_MOST = 6000;
 // The camera goes from the play view to the view from above in this many seconds.
 const TURN_SECONDS = 2.2;

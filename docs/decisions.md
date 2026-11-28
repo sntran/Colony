@@ -702,7 +702,9 @@ These are the decisions that the plan does not make. The plan is
      then spring again. The fog and the light change across each river.
 191. **The end of the story** shows the full world above the list of the names. The
      picture of a long world has parts, from the north to the south, each with the full
-     width of the world. The picture has 6,000 pixels in its length at the most.
+     width of the world. A long picture has fewer pixels: about 6,000 in its length, but
+     not less than one canvas pixel for each page pixel. Thus a very long world makes a
+     longer picture: 390 x 7,268 pixels for 35 crossings.
 192. **The names in the picture** are in two columns only when each name and its numbers
      fit. If not, they are in one column. The list on the screen has one column.
 193. **The story button flashes 7 times** after a crossing.
@@ -734,3 +736,13 @@ These are the decisions that the plan does not make. The plan is
 200. **The fast clients of play test 2 have no browser.** They use the code of the page
      (the world, the guide, the button) and the script of the new player. The time with
      no guide and no bright button counts from 6.5 seconds after the join.
+201. **Play test 6 compares the frame time with the same picture.** The young world has
+     22 workers near the nest, and the long world 350, with bridges near the nest. The test
+     thus measures the two worlds also with no body drawn: only the ground, the water, the
+     grass and the stones. The target "the frame time does not increase" uses this measure.
+     The report also gives the frame time with the bodies.
+202. **Play test 5 compares the story with no walks.** The walks on the bodies are a live
+     number, and the two pages ask for the story at two moments.
+203. **The screenshots of lands 5 to 8 and of a story of 10 rivers** use a world from
+     `test/play/make_long.exs`: 6 players lock fast, with no walk. The other screenshots
+     come from play.

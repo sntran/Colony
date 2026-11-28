@@ -30,12 +30,19 @@ const sleep = (time) => new Promise((resolve) => setTimeout(resolve, time));
 
 // The frame time of a page: the median and the 90th percentile of 120 frames, in
 // milliseconds, and the parts of the world that the page drew. The page draws with all
-// its pixels for the measure.
-async function frameTime(session) {
-  return session.page.evaluate(async () => {
+// its pixels for the measure. With `ground`, the page draws no body: only the ground, the
+// water, the grass and the stones. Thus two worlds with different bodies near the camera
+// give the same picture to compare.
+async function frameTime(session, ground = false) {
+  return session.page.evaluate(async (ground) => {
     const renderer = window.colony.renderer;
+    const world = window.colony.world;
     const scale = renderer.scale;
     renderer.scale = 1;
+    if (ground) {
+      world.hideFree = true;
+      world.storyLimit = 0;
+    }
     const times = [];
     let last = performance.now();
     for (let i = 0; i < 121; i++) {
@@ -45,9 +52,11 @@ async function frameTime(session) {
       last = now;
     }
     renderer.scale = scale;
+    world.hideFree = false;
+    world.storyLimit = Infinity;
     times.sort((a, b) => a - b);
-    return { median: Number(times[60].toFixed(1)), p90: Number(times[108].toFixed(1)), parts: renderer.partsDrawn, all: renderer.parts.length };
-  });
+    return { median: Number(times[60].toFixed(1)), p90: Number(times[108].toFixed(1)), parts: renderer.partsDrawn, all: renderer.parts.length, bodies: world.bodyCount };
+  }, ground);
 }
 
 // The sizes of the messages that a page gets in its first seconds, in bytes.
@@ -212,10 +221,15 @@ const tests = {
       for (const session of [one, two]) await session.tapOn("storyButton");
       await Promise.all([one, two].map((session) => session.page.waitForFunction(() => window.colony.story.state().phase === "play" && window.colony.story.info, null, { timeout: 10000 })));
       const stories = await Promise.all([one, two].map((session) => session.page.evaluate(() => window.colony.story.data())));
+      // The walks on the bodies are a live number: the workers walk all the time, and the
+      // two pages ask for the story at two moments. The story is the same without them.
+      const walks = stories.map((story) => story.names.map((entry) => entry.walks));
+      const still = stories.map((story) => ({ locks: story.locks, names: story.names.map(({ walks: _, ...entry }) => entry) }));
       console.log(`  the marks of the open cells were the same in ${same} of ${compared} looks`);
       check("two", "the two players see the same records", JSON.stringify(a.records) === JSON.stringify(b.records), a.records.map((r) => `river ${r.id}: ${r.names.map((n) => `${n.name} ${n.bodies}`).join(", ")}`).join("; "));
       check("two", "a record has the names of the two players", record && [a.name, b.name].every((name) => record.names.some((entry) => entry.name === name && entry.bodies > 0)));
-      check("two", "the two players see the same story", JSON.stringify(stories[0]) === JSON.stringify(stories[1]), `${stories[0].locks.length} locks`);
+      console.log(`  the walks of the players in the two stories: ${JSON.stringify(walks)}`);
+      check("two", "the two players see the same story", JSON.stringify(still[0]) === JSON.stringify(still[1]), `${stories[0].locks.length} locks, ${stories[0].names.length} names`);
       // A look can fall between two messages of the server: one page has the new open
       // cells, the other not yet. Most of the looks must be the same.
       check("two", "the two players see the same marks of the open cells", compared > 0 && same / compared >= 0.9, `${same} of ${compared}`);
@@ -236,7 +250,7 @@ const tests = {
       let browser = await launch();
       let session = await open(browser);
       await sleep(3000);
-      const young = { frames: await frameTime(session), rivers: (await session.page.evaluate(() => window.colony.world.grid.rivers.length)) };
+      const young = { frames: await frameTime(session), ground: await frameTime(session, true), rivers: (await session.page.evaluate(() => window.colony.world.grid.rivers.length)) };
       await browser.close();
 
       const result = await crowd(20, minutes, (...words) => console.log("  ", ...words));
@@ -252,7 +266,7 @@ const tests = {
       await sleep(4000);
       sizes.push(...counter);
       const world = await session.page.evaluate(() => ({ rivers: window.colony.world.grid.rivers.length, rows: window.colony.world.grid.rows, locked: window.colony.world.locked.size, stage: window.colony.world.stage }));
-      const old = { frames: await frameTime(session) };
+      const old = { frames: await frameTime(session), ground: await frameTime(session, true) };
       const largest = [...sizes].sort((a, b) => b - a);
       await session.tapOn("storyButton");
       await session.page.waitForFunction(() => window.colony.story.state().phase === "play");
@@ -265,12 +279,14 @@ const tests = {
         const result = await window.colony.picture();
         return { bytes: Math.floor(((result.data.length - result.data.indexOf(",") - 1) * 3) / 4), parts: window.colony.story.pictureParts, names: result.names.length };
       });
-      console.log(`  the young world (${young.rivers} rivers): frame time ${JSON.stringify(young.frames)}`);
-      console.log(`  the long world (${world.stage - 1} crossings, ${world.rivers} rivers, ${world.rows} rows, ${world.locked} locked bodies): frame time ${JSON.stringify(old.frames)}`);
+      console.log(`  the young world (${young.rivers} rivers): frame time ${JSON.stringify(young.frames)}, with no body ${JSON.stringify(young.ground)}`);
+      console.log(`  the long world (${world.stage - 1} crossings, ${world.rivers} rivers, ${world.rows} rows, ${world.locked} locked bodies): frame time ${JSON.stringify(old.frames)}, with no body ${JSON.stringify(old.ground)}`);
       console.log(`  the first messages: ${largest.slice(0, 3).join(", ")} bytes, all ${sizes.reduce((a, b) => a + b, 0)} bytes in ${sizes.length} messages`);
       console.log(`  the story: ${story.total} bodies in ${story.seconds} s. The picture: ${picture.bytes} bytes, ${picture.parts} parts, ${picture.names} names`);
       check("longworld", "the colony crossed 20 rivers or more", result.crossed >= 20, `${result.crossed}`);
-      check("longworld", "the frame time does not increase in the long world", old.frames.median <= young.frames.median * 1.25, `${young.frames.median} ms and ${old.frames.median} ms`);
+      // The same picture (no body) in the two worlds: the length of the world must not make
+      // the frame slower. The bodies near the camera are different in the two worlds.
+      check("longworld", "the frame time does not increase in the long world", old.ground.median <= young.ground.median * 1.25, `${young.ground.median} ms and ${old.ground.median} ms with no body`);
       check("longworld", "the story takes 40 seconds at the most", story.seconds <= 40, `${story.seconds} s`);
       check("longworld", "the page has no error", session.errors.length === 0, session.errors.slice(0, 2).join(" | "));
       await browser.close();
@@ -282,11 +298,11 @@ const tests = {
   // The screenshots of section 5.3.
   async shots() {
     const shot = (session, name) => session.shot(path.join(SHOTS, `${name}.jpg`));
+    const taken = new Set();
     const server = await startServer({ helpers: 0, seed: SEEDS[0] });
     const browser = await launch();
     try {
       const session = await open(browser);
-      const taken = new Set();
       const once = async (name, ok) => {
         if (!ok || taken.has(name)) return;
         taken.add(name);
@@ -312,24 +328,71 @@ const tests = {
             stage = state.stage;
             crossedAt = seconds;
           }
-          // Some seconds after a crossing: the carriers carry the eggs to the new nest.
-          await once("nest-move", crossedAt !== null && seconds - crossedAt > 7 && stage >= 2);
+          // Some seconds after a crossing: the carriers carry the eggs to the new nest. The
+          // camera looks at the new nest for the picture.
+          if (crossedAt !== null && seconds - crossedAt > 4 && stage >= 2 && !taken.has("nest-move")) {
+            const eggs = await session.page.evaluate(() => {
+              const w = window.colony.world.workers;
+              let count = 0;
+              for (let id = 0; id < window.colony.world.workerEnd; id++) if (w.alive[id] && w.carry[id] === 2) count++;
+              return count;
+            });
+            if (eggs >= 3) {
+              taken.add("nest-move");
+              await session.page.evaluate(() => {
+                const { world, camera } = window.colony;
+                window.colony.freeze(true);
+                Object.assign(camera, { x: world.grid.x(world.nest), z: world.grid.z(world.nest) + 3 });
+              });
+              await shot(session, "nest-move");
+              await session.page.evaluate(() => window.colony.freeze(false));
+            }
+          }
         },
       });
-      console.log(`  screenshots: ${[...taken].sort().join(", ")}`);
     } finally {
       await browser.close();
       await server.stop();
     }
 
+    // Few workers: the colony has no spare body, and the guide shows a pile.
+    const server3 = await startServer({ helpers: 0, carriers: 4, spare: 3, seed: SEEDS[0] });
+    const browser3 = await launch();
+    try {
+      const session = await open(browser3);
+      await playNew(session, {
+        limit: 150,
+        done: () => taken.has("button-none") && taken.has("guide-pile"),
+        each: async (state) => {
+          const guide = await session.page.evaluate(() => {
+            const current = window.colony.player.current;
+            return { kind: current ? current.kind : null, mark: Boolean(window.colony.view().mark) };
+          });
+          if (state.button === "none" && !taken.has("button-none")) {
+            taken.add("button-none");
+            await shot(session, "button-none");
+          }
+          if (guide.kind === "pile" && guide.mark && !taken.has("guide-pile")) {
+            taken.add("guide-pile");
+            await shot(session, "guide-pile");
+          }
+        },
+      });
+      console.log(`  screenshots: ${[...taken].sort().join(", ")}`);
+    } finally {
+      await browser3.close();
+      await server3.stop();
+    }
+
     // Lands 5 to 8 and the story of a world with 10 rivers: a world that the script
-    // tmp/make-long.exs made. Without the file, these screenshots are not made.
+    // test/play/make_long.exs made. Without the file, these screenshots are not made:
+    //     mix run --no-start test/play/make_long.exs 10 tmp/long10.bin 7
     const long = path.join(root, "tmp/long10.bin");
     const copy = path.join(root, "tmp/long10-play.bin");
     try {
       copyFileSync(long, copy);
     } catch (_) {
-      console.log("  no tmp/long10.bin: no screenshot of lands 5 to 8 and of the story");
+      console.log("  no tmp/long10.bin: no screenshot of lands 5 to 8 and of the story (see test/play/make_long.exs)");
       return;
     }
     const server2 = await startServer({ save: copy, keep: true });
@@ -343,7 +406,7 @@ const tests = {
         const grid = world.grid;
         const z = ((grid.rivers[5].start + grid.rivers[8].start) / 2) * 0.866;
         window.colony.freeze(true);
-        Object.assign(camera, { x: 30, z: z - 8, height: 46, distance: 58, turn: 0 });
+        Object.assign(camera, { x: 30, z: z - 4, height: 58, distance: 26, turn: 0 });
       });
       await session.shot(path.join(SHOTS, "lands-5-to-8.jpg"));
       await session.page.evaluate(() => window.colony.freeze(false));
